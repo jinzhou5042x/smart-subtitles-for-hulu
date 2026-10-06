@@ -7,13 +7,19 @@ export const providerRank = provider => provider === 'codex' || !provider ? 2 : 
 export function subtitleHash(cues) {
   return createHash('sha256').update(JSON.stringify(cues.map(c => [c.start, c.end, c.text.normalize('NFC').replace(/\s+/g, ' ').trim()]))).digest('hex');
 }
+// Tokens a translator used (Codex): input (including cached input), cached input, output (including reasoning) and reasoning.
+export const USAGE = { input: 'input_tokens', cachedInput: 'cached_input_tokens', output: 'output_tokens', reasoning: 'reasoning_output_tokens' };
+export const addUsage = (a, b) => (a || b) && Object.fromEntries(Object.keys(USAGE).map(k => [k, (a?.[k] || 0) + (b?.[k] || 0)]));
+const usageOf = row => row && Object.values(USAGE).some(c => row[c]) ? Object.fromEntries(Object.entries(USAGE).map(([k, c]) => [k, row[c]])) : null;
+const USAGE_COLUMNS = Object.values(USAGE).join(', ');
+
 // Identifies an episode translation in memory: the normalized subtitles (timing and text) and the target language.
 export const episodeHash = request => createHash('sha256').update(JSON.stringify([subtitleHash(request.cues), request.target])).digest('hex');
 
 // The local translation database (data/episodes/subtitles.sqlite):
 // - sources: one row per subtitle file, keyed by subtitleHash; its cues map an idx to timestamps.
 // - translations: per source, target language and provider, how many cues (`done`, a prefix
-//   from idx 0) are translated and whether the translation is complete.
+//   from idx 0) are translated, whether the translation is complete, and the tokens it used so far.
 // - lines: the translated text by the idx of its first cue; `span` is 2 when a translator merged
 //   two cues into one line (local mode), otherwise 1.
 // A partial translation is written as it arrives, so it survives a restart of the service and is resumed.
@@ -25,6 +31,8 @@ export class SubtitleDatabase {
       CREATE TABLE IF NOT EXISTS sources(hash TEXT PRIMARY KEY, cues TEXT NOT NULL, cue_count INTEGER NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS translations(hash TEXT NOT NULL, target TEXT NOT NULL, provider TEXT NOT NULL, done INTEGER NOT NULL, complete INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(hash, target, provider));
       CREATE TABLE IF NOT EXISTS lines(hash TEXT NOT NULL, target TEXT NOT NULL, provider TEXT NOT NULL, idx INTEGER NOT NULL, span INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(hash, target, provider, idx));`);
+    const columns = new Set(db.prepare('PRAGMA table_info(translations)').all().map(c => c.name));
+    for (const column of Object.values(USAGE)) if (!columns.has(column)) db.exec(`ALTER TABLE translations ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episodes'").get()) this.migrate(db);
     return db;
   }
@@ -35,7 +43,7 @@ export class SubtitleDatabase {
       for (const row of db.prepare('SELECT target, provider, cues, segments, created_at FROM episodes').all()) {
         const cues = JSON.parse(row.cues), hash = subtitleHash(cues);
         db.prepare('INSERT OR IGNORE INTO sources VALUES(?,?,?,?)').run(hash, row.cues, cues.length, row.created_at);
-        db.prepare('INSERT OR IGNORE INTO translations VALUES(?,?,?,?,1,?)').run(hash, row.target, row.provider, cues.length, row.created_at);
+        db.prepare('INSERT OR IGNORE INTO translations(hash, target, provider, done, complete, updated_at) VALUES(?,?,?,?,1,?)').run(hash, row.target, row.provider, cues.length, row.created_at);
         for (const s of JSON.parse(row.segments)) db.prepare('INSERT OR IGNORE INTO lines VALUES(?,?,?,?,?,?)').run(hash, row.target, row.provider, s.indices[0], s.indices.length, s.text);
       }
       db.exec('DROP TABLE episodes; COMMIT');
@@ -48,13 +56,17 @@ export class SubtitleDatabase {
     const segments = rows.map(r => ({ sourceIds: Array.from({ length: r.span }, (_, k) => request.cues[r.idx + k]?.id), text: r.text }));
     return validateTranslation({ segments }, request.cues.slice(0, count));
   }
-  // Returns a complete translation when it is at least as good as the requested provider: the
-  // highest-ranked one, and among equals the first completed. `fallback` also accepts a lower-ranked one.
+  // The complete translation that `get` returns: the highest-ranked one, and among equals the first completed.
+  best(db, hash, target) {
+    const rows = db.prepare(`SELECT provider, ${USAGE_COLUMNS} FROM translations WHERE hash=? AND target=? AND complete=1 ORDER BY updated_at`).all(hash, target);
+    return rows.sort((a, b) => providerRank(b.provider) - providerRank(a.provider))[0];
+  }
+  // Returns a complete translation when it is at least as good as the requested provider.
+  // `fallback` also accepts a lower-ranked one.
   get(request, { fallback = false } = {}) {
     const hash = subtitleHash(request.cues);
     return this.with(db => {
-      const rows = db.prepare('SELECT provider FROM translations WHERE hash=? AND target=? AND complete=1 ORDER BY updated_at').all(hash, request.target);
-      const best = rows.sort((a, b) => providerRank(b.provider) - providerRank(a.provider))[0];
+      const best = this.best(db, hash, request.target);
       if (!best || (!fallback && providerRank(best.provider) < providerRank(request.provider))) return null;
       try { return this.read(db, hash, request, best.provider, request.cues.length); }
       catch { this.forget(db, hash, request.target, best.provider); return null; }
@@ -70,24 +82,37 @@ export class SubtitleDatabase {
       catch { this.forget(db, hash, request.target, provider); return []; }
     });
   }
+  // Tokens used by the complete translation that `get` returns, or (`partial`) by the requested
+  // provider's unfinished one; null when none were recorded.
+  usage(request, { partial = false } = {}) {
+    const hash = subtitleHash(request.cues);
+    return this.with(db => usageOf(partial
+      ? db.prepare(`SELECT ${USAGE_COLUMNS} FROM translations WHERE hash=? AND target=? AND provider=? AND complete=0`).get(hash, request.target, request.provider || 'codex')
+      : this.best(db, hash, request.target)));
+  }
   forget(db, hash, target, provider) {
     db.prepare('DELETE FROM lines WHERE hash=? AND target=? AND provider=?').run(hash, target, provider);
     db.prepare('DELETE FROM translations WHERE hash=? AND target=? AND provider=?').run(hash, target, provider);
   }
-  // Stores the accepted prefix `segments` (validated against the first cues). A complete translation
-  // is kept: the first complete result of a provider is never overwritten.
-  save(request, segments, { complete = false } = {}) {
+  // Stores the accepted prefix `segments` (validated against the first cues, possibly none) and the
+  // tokens used so far. A complete translation is kept: the first complete result of a provider is never overwritten.
+  save(request, segments, { complete = false, usage } = {}) {
     const count = segments.reduce((n, s) => n + s.sourceIds.length, 0);
     const cues = request.cues.slice(0, count);
-    const validated = validateTranslation({ segments }, cues);
+    const validated = count ? validateTranslation({ segments }, cues) : [];
     if (complete && count !== request.cues.length) throw new Error('Incomplete translation');
     const index = new Map(request.cues.map((c, i) => [c.id, i]));
     const hash = subtitleHash(request.cues), provider = request.provider || 'codex', now = new Date().toISOString();
     this.with(db => {
       db.exec('BEGIN IMMEDIATE');
       try {
-        const existing = db.prepare('SELECT done, complete FROM translations WHERE hash=? AND target=? AND provider=?').get(hash, request.target, provider);
-        if (existing?.complete || (!complete && existing && existing.done >= count)) return db.exec('COMMIT');
+        const existing = db.prepare(`SELECT done, complete, ${USAGE_COLUMNS} FROM translations WHERE hash=? AND target=? AND provider=?`).get(hash, request.target, provider);
+        if (existing?.complete) return db.exec('COMMIT');
+        const tokens = Object.entries(USAGE).map(([k, c]) => usage ? usage[k] || 0 : existing?.[c] || 0);
+        if (!complete && existing && existing.done >= count) {
+          if (usage) db.prepare(`UPDATE translations SET ${Object.values(USAGE).map(c => `${c}=?`).join(', ')}, updated_at=? WHERE hash=? AND target=? AND provider=?`).run(...tokens, now, hash, request.target, provider);
+          return db.exec('COMMIT');
+        }
         db.prepare('INSERT OR IGNORE INTO sources VALUES(?,?,?,?)').run(hash, JSON.stringify(request.cues.map(({ start, end, text }) => ({ start, end, text }))), request.cues.length, now);
         // A growing prefix only appends its new lines; a complete result (whose final text may differ
         // from the streamed lines) or a prefix that does not continue at `done` replaces them all.
@@ -97,10 +122,10 @@ export class SubtitleDatabase {
         if (!append) db.prepare('DELETE FROM lines WHERE hash=? AND target=? AND provider=?').run(hash, request.target, provider);
         const line = db.prepare('INSERT OR REPLACE INTO lines VALUES(?,?,?,?,?,?)');
         for (const l of lines) if (!append || l.idx >= from) line.run(hash, request.target, provider, l.idx, l.span, l.text);
-        db.prepare('INSERT OR REPLACE INTO translations VALUES(?,?,?,?,?,?)').run(hash, request.target, provider, count, complete ? 1 : 0, now);
+        db.prepare(`INSERT OR REPLACE INTO translations(hash, target, provider, done, complete, updated_at, ${USAGE_COLUMNS}) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(hash, request.target, provider, count, complete ? 1 : 0, now, ...tokens);
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     });
   }
-  put(request, segments) { this.save(request, segments, { complete: true }); }
+  put(request, segments, usage) { this.save(request, segments, { complete: true, usage }); }
 }

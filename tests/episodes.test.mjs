@@ -212,3 +212,33 @@ test('accepted lines are stored as they arrive and a restarted service resumes a
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+
+test('tokens of interrupted runs are kept and added to the complete translation', async () => {
+  const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
+  const cues = ['One.', 'Two.'].map((text, i) => ({ id: 'c' + i, start: i * 2, end: i * 2 + 1, text }));
+  let attempt = 0;
+  const queue = new JobQueue({ translate: async (r, signal, progress) => {
+    if (++attempt === 1) {
+      progress({ phase: 'receiving', usage: { input: 1000, cachedInput: 0, output: 50, reasoning: 0 }, partialSegments: [{ sourceIds: ['c0'], text: '一', start: 0, end: 1 }] });
+      await new Promise(resolve => setTimeout(resolve, 300));
+      throw new Error('usage limit');
+    }
+    progress({ phase: 'receiving', usage: { input: 900, cachedInput: 800, output: 40, reasoning: 5 } });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    return [...r.accepted, { sourceIds: ['c1'], text: '二', start: 2, end: 3 }];
+  } }, {});
+  const request = { client: 'tab-1-0', epoch: '1', session: 's', provider: 'codex', target: 'zh-CN', context: [], cues };
+  try {
+    const manager = new EpisodeManager(queue, {}, dir);
+    const first = await manager.submit(request); await manager.episodes.get(first.id).task;
+    assert.equal(manager.get(first.id).status, 'error');
+    assert.deepEqual(manager.get(first.id).usage, { input: 1000, cachedInput: 0, output: 50, reasoning: 0 });
+    // A restarted service continues the count.
+    const restarted = new EpisodeManager(queue, {}, dir);
+    const second = await restarted.submit({ ...request, epoch: '2' }); await restarted.episodes.get(second.id).task;
+    const total = { input: 1900, cachedInput: 800, output: 90, reasoning: 5 };
+    assert.equal(restarted.get(second.id).status, 'done'); assert.deepEqual(restarted.get(second.id).usage, total);
+    const loaded = await new EpisodeManager(queue, {}, dir).submit({ ...request, epoch: '3' });
+    assert.equal(loaded.cached, true); assert.deepEqual(loaded.usage, total);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

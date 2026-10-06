@@ -13,7 +13,7 @@
   function progressInfo() {
     const seconds = Math.floor((Date.now() - acquisitionStarted) / 1000);
     const waiting = seconds >= 20;
-    if (complete) return { status: episode?.cached ? 'Loaded from the local database' : 'Episode subtitles ready', detail: `${cues.length} subtitles · synced to the original timing` };
+    if (complete) return { status: episode?.cached ? 'Loaded from the local database' : 'Episode subtitles ready', detail: 'Synced to the original timing' };
     if (error) return { status: 'Translation paused', detail: error, retry: true };
     if (!video) return { status: 'Waiting for a Hulu video', detail: '' };
     if (selected) {
@@ -23,12 +23,12 @@
         const idle = Math.floor((Date.now() - p.lastActivity) / 1000);
         if (settings.provider === 'local') {
           const label = { local_loading: 'Preparing the local model', local_terms: 'Local model: unifying names', local_retrying: 'Batch failed validation, retrying', local_reading: 'Local model: reading subtitles', local_receiving: 'Local model: translating', validating: 'Validating this batch' }[p.phase] || 'Local model: working';
-          return { status: label, detail: `${p.batch ? `Batch ${p.batch}/${p.totalBatches} · ` : ''}${p.generatedCues || 0}/${p.totalCues || cues.length} generated · ${durationLabel(episode.elapsedMs / 1000)} elapsed${idle >= 60 ? ` · no output for ${idle} s` : ''}` };
+          return { status: label, detail: [p.batch && `Batch ${p.batch} of ${p.totalBatches}`, idle >= 60 && `No output for ${idle} s`].filter(Boolean).join(' · ') };
         }
         const label = { connecting: 'Connecting to Codex', submitted: 'Codex received the request', receiving: 'Receiving the Codex translation', retrying: 'Codex problem, continuing', validating: 'Validating the full translation' }[p.phase] || 'Working';
-        return { status: idle >= 60 ? 'No new output from Codex' : label, detail: `${p.completedCues ? `${p.completedCues}/${p.totalCues || cues.length} shown · ` : ''}${p.outputChars || 0} output characters · ${idle >= 60 ? `no update for ${idle} s` : `${durationLabel(episode.elapsedMs / 1000)} elapsed`}` };
+        return { status: idle >= 60 ? 'No new output from Codex' : label, detail: idle >= 60 ? `No update for ${idle} s` : '' };
       }
-      return { status: episode.status === 'done' ? 'Syncing the full translation' : episode.status === 'queued' ? 'Episode translation queued' : (settings.provider === 'local' ? 'The local model is translating the episode' : settings.provider === 'google' ? 'Google is translating the episode' : 'Codex is translating the episode'), detail: `${cues.length} subtitles · ${settings.provider === 'local' ? 'in batches' : settings.provider === 'google' ? 'Google Translate' : 'single request'} · waited ${durationLabel(episode.elapsedMs / 1000)}` };
+      return { status: episode.status === 'done' ? 'Syncing the full translation' : episode.status === 'queued' ? 'Episode translation queued' : (settings.provider === 'local' ? 'The local model is translating the episode' : settings.provider === 'google' ? 'Google is translating the episode' : 'Codex is translating the episode'), detail: '' };
     }
     if (capture.pending > 0) return { status: 'Reading subtitle files', detail: `${capture.pending} pending · ${capture.received || 0} received`, retry: waiting };
     if (candidates.length) {
@@ -45,7 +45,7 @@
   const host = document.createElement('div'); host.id = 'hulu-context-subtitles';
   const shadow = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
-  style.textContent = `:host{all:initial;position:fixed;z-index:2147483646;pointer-events:none;display:none}*{box-sizing:border-box}.wrap{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-end;flex-direction:column;padding:0 2% 5%;text-align:center;font-family:"Microsoft YaHei",system-ui,sans-serif}.line{display:flex;align-items:center;justify-content:center;text-align:center;max-width:none;width:max-content;flex-shrink:0;white-space:nowrap;line-height:1.15;border-radius:5px;text-shadow:0 2px 4px #000;background:#090d12bf;padding:2px 10px;color:#fff;font-size:var(--subtitle-size,26px);font-weight:600}.original{font-size:var(--original-size,18px);color:#f1f1f1;margin-top:2px;font-weight:400;line-height:1.15}.line:empty{display:none}.line{pointer-events:auto;cursor:grab;user-select:none;touch-action:none}.dragging .line{cursor:grabbing}.badge{position:absolute;top:16px;left:16px;color:#fff;background:#101820b5;padding:6px 10px;border-radius:6px;font:12px system-ui}.badge:empty{display:none}`;
+  style.textContent = `:host{all:initial;position:fixed;z-index:2147483646;pointer-events:none;display:none}*{box-sizing:border-box}.wrap{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-end;flex-direction:column;padding:0 2% 5%;text-align:center;font-family:"Microsoft YaHei",system-ui,sans-serif}.line{display:flex;align-items:center;justify-content:center;text-align:center;max-width:none;width:max-content;flex-shrink:0;white-space:nowrap;line-height:1.15;border-radius:5px;text-shadow:0 2px 4px #000;background:#090d12bf;padding:2px 10px;color:#fff;font-size:var(--subtitle-size,26px);font-weight:600}.original{font-size:var(--original-size,18px);color:#f1f1f1;margin-top:calc(var(--original-size,18px)*.3);font-weight:400;line-height:1.15}.line:empty{display:none}.line{pointer-events:auto;cursor:grab;user-select:none;touch-action:none}.dragging .line{cursor:grabbing}.badge{position:absolute;top:16px;left:16px;color:#fff;background:#101820b5;padding:6px 10px;border-radius:6px;font:12px system-ui}.badge:empty{display:none}`;
   const wrap = document.createElement('div'); wrap.className = 'wrap';
   const translatedLine = document.createElement('div'); translatedLine.className = 'line';
   const originalLine = document.createElement('div'); originalLine.className = 'line original';
@@ -179,7 +179,7 @@
     const fontSize = Math.max(18, Math.min(100, Number(settings?.fontSize) || 60));
     host.style.setProperty('--subtitle-size', `${fontSize}px`);
     host.style.setProperty('--original-size', `${Math.round(fontSize * 0.7)}px`);
-    host.dataset.version = '0.9.0'; host.dataset.source = source; host.dataset.cues = String(cues.length); host.dataset.translated = String(translations.size);
+    host.dataset.version = '0.9.1'; host.dataset.source = source; host.dataset.cues = String(cues.length); host.dataset.translated = String(translations.size);
     const progress = progressInfo(); status = progress.status; host.dataset.detail = progress.detail;
     host.dataset.status = status; host.dataset.error = error; host.dataset.captured = String(candidates.length); host.dataset.captureError = captureError; host.dataset.timingInfo = timingInfo;
     host.dataset.complete = String(complete); host.dataset.episode = episode?.id || '';
@@ -215,7 +215,10 @@
       if (languageChanged) clearTranslation();
       render(); respond({ ok: true });
     } else if (m.type === 'diagnostics') {
-      respond({ version: '0.9.0', video: !!video, source, total: cues.length, translated: translations.size, complete, busy, ...progressInfo(), error, captureError, episodeId: episode?.id, files: candidates.map(f => ({ name: f.name, language: f.language, cues: f.cues.length })) });
+      const info = progressInfo(), working = !!episode && ['queued', 'running'].includes(episode.status);
+      // tone: done, working, error or waiting; the popup draws the progress, time and tokens from these fields.
+      const tone = complete ? 'done' : error ? 'error' : working ? 'working' : info.retry ? 'error' : 'waiting';
+      respond({ version: '0.9.1', video: !!video, source, total: cues.length, translated: translations.size, complete, busy, ...info, tone, cached: !!episode?.cached, elapsedMs: episode && !episode.cached ? episode.elapsedMs : null, usage: episode?.usage || null, error, captureError, episodeId: episode?.id, files: candidates.map(f => ({ name: f.name, language: f.language, cues: f.cues.length })) });
     } else if (m.type === 'retry') { error = ''; retryAt = 0; window.postMessage({ type: 'hulu-context-replay' }, location.origin); respond({ ok: true }); }
     else if (m.type === 'importSubtitles') {
       try { const list = C.parseSubtitles(m.text); imported = { cues: list, fingerprint: C.hash(m.text) }; adopt(imported, 'Imported episode subtitles'); respond({ ok: true, count: list.length }); }

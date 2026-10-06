@@ -104,3 +104,20 @@ test('a retry resumes from accepted subtitles; an attempt without progress fails
   await assert.rejects(stuck.translator.translate({ ...request, cues: five }), /wrong number of subtitles \(1\/5\)/);
   assert.equal(stuck.prompts.length, 1);
 });
+
+test('Codex token usage is reported per episode and adds up across attempts', async () => {
+  const text = JSON.stringify({ segments: [{ i: 1, t: '你好' }] });
+  const total = (input, cached, output, reasoning) => ({ tokenUsage: { total: { inputTokens: input, cachedInputTokens: cached, outputTokens: output, reasoningOutputTokens: reasoning, totalTokens: input + output }, last: {} } });
+  const translator = mock([
+    { method: 'thread/tokenUsage/updated', params: total(1000, 0, 0, 0) },
+    { method: 'thread/tokenUsage/updated', params: total(1000, 0, 300, 40) },
+    { method: 'item/agentMessage/delta', params: { delta: text } }, { method: 'turn/completed', params: { turn: { status: 'completed' } } }]);
+  const progress = [];
+  await translator.translate(request, undefined, p => progress.push(p));
+  assert.deepEqual(progress.at(-1).usage, { input: 1000, cachedInput: 0, output: 300, reasoning: 40 });
+  // Another thread's usage is ignored.
+  const other = mock([{ method: 'thread/tokenUsage/updated', params: { ...total(5, 5, 5, 5), threadId: 'x' } }, { method: 'item/agentMessage/delta', params: { delta: text } }, { method: 'turn/completed', params: { turn: { status: 'completed' } } }]);
+  const seen = [];
+  await other.translate(request, undefined, p => seen.push(p));
+  assert.equal(seen.at(-1).usage, undefined);
+});

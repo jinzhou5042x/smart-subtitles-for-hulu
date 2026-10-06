@@ -8,7 +8,7 @@ A local Windows service plus a Chrome extension that shows bilingual subtitles o
 
 1. Double-click **Start Subtitles.cmd** to start the service (**Check Environment.cmd** checks Node, Codex and the service).
 2. In Chrome open `chrome://extensions/`, enable developer mode and load the `dist\extension` folder of this project (created by `npm run build` or the start script).
-3. After an update, click the extension's reload icon and refresh the Hulu page. Current version: **0.9.0**.
+3. After an update, click the extension's reload icon and refresh the Hulu page. Current version: **0.9.1**.
 4. The popup has the subtitle toggle, the target language, the translator and episode progress; on failure it offers a retry.
 5. Drag the subtitle lines with the mouse to move them up or down (vertical only). The position is kept as a share of the picture height, across full screen, episodes and reloads. Dragging never reaches the player.
 

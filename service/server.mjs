@@ -43,7 +43,7 @@ export function createServer(config, queue, episodes) {
       res.setHeader('Access-Control-Allow-Private-Network', 'true'); res.writeHead(204); return res.end();
     }
     const url = new URL(req.url, `http://127.0.0.1:${config.port}`);
-    if (req.method === 'GET' && url.pathname === '/health') return json(200, { app: 'hulu-context-subtitles', version: '0.9.0', ready: true });
+    if (req.method === 'GET' && url.pathname === '/health') return json(200, { app: 'hulu-context-subtitles', version: '0.9.1', ready: true });
     // Development only: the demo clip is served when tests/fixtures exists (not in the release).
     const publicFiles = { '/demo': 'tests/fixtures/demo.html', '/demo.vtt': 'tests/fixtures/demo.vtt', '/demo.mp4': 'tests/fixtures/demo.mp4' };
     if (req.method === 'GET' && publicFiles[url.pathname] && await access(path.join(root, 'tests/fixtures')).then(() => true, () => false)) {

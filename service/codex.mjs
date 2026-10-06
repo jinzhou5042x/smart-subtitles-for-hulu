@@ -4,6 +4,11 @@ import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { root } from './config.mjs';
 import { instructions, outputSchema, buildPrompt, alignByIndex, segmentStream, validateTranslation } from './translation.mjs';
+import { addUsage } from './database.mjs';
+
+// thread/tokenUsage/updated reports a thread's running total; inputTokens includes cachedInputTokens
+// and outputTokens includes reasoningOutputTokens.
+export const threadUsage = total => ({ input: total?.inputTokens || 0, cachedInput: total?.cachedInputTokens || 0, output: total?.outputTokens || 0, reasoning: total?.reasoningOutputTokens || 0 });
 
 // codexPath is an executable ("codex", a codex.exe path) or [node.exe, codex.js] for the copy that
 // "Set Up Codex.cmd" installs; relative paths are resolved against the app folder. Never via a shell.
@@ -63,13 +68,15 @@ export class CodexTranslator extends EventEmitter {
   async translate(request, signal, onProgress = () => {}) {
     const accepted = [...(request.accepted || [])];
     const done = () => accepted.reduce((n, s) => n + s.sourceIds.length, 0);
+    // Tokens of the threads that already ended; each attempt (thread) adds its own.
+    const spent = { usage: null };
     let progress = { phase: 'connecting', outputChars: 0, lastActivity: Date.now() };
     const report = changes => { progress = { ...progress, ...changes, lastActivity: Date.now() }; onProgress(progress); };
     report(accepted.length ? { partialSegments: [...accepted], completedCues: done(), totalCues: request.cues.length } : {});
     let lastError;
     while (done() < request.cues.length) {
       const before = done();
-      try { await this.translateRest(request, accepted, signal, report); }
+      try { await this.translateRest(request, accepted, signal, report, spent); }
       catch (error) {
         signal?.throwIfAborted(); lastError = error;
         if (done() === before) throw error;
@@ -78,7 +85,7 @@ export class CodexTranslator extends EventEmitter {
     }
     return validateTranslation({ segments: accepted }, request.cues);
   }
-  async translateRest(request, accepted, signal, report) {
+  async translateRest(request, accepted, signal, report, spent = { usage: null }) {
     const offset = accepted.reduce((n, s) => n + s.sourceIds.length, 0), rest = request.cues.slice(offset);
     const byId = new Map(request.cues.map(c => [c.id, c]));
     // Already accepted lines give the continuation its context; they are not translated again.
@@ -90,7 +97,7 @@ export class CodexTranslator extends EventEmitter {
     const response = await this.rpc('thread/start', params), { thread } = response;
     this.lastModel = response.model;
     report({ phase: 'submitted', model: response.model });
-    let turnId, text = '', streamed = 0, streaming = true, outputChars = 0;
+    let turnId, text = '', streamed = 0, streaming = true, outputChars = 0, tokens = null;
     const feed = segmentStream();
     try {
       await new Promise((resolve, reject) => {
@@ -105,6 +112,7 @@ export class CodexTranslator extends EventEmitter {
         const onFailure = e => finish(e);
         const onMessage = m => {
           if (m.params?.threadId !== thread.id) return;
+          if (m.method === 'thread/tokenUsage/updated') { tokens = threadUsage(m.params.tokenUsage?.total); report({ usage: addUsage(spent.usage, tokens) }); }
           if (m.method === 'error') {
             if (!m.params.willRetry) return finish(new Error(m.params.error?.message || 'Codex request failed'));
             report({ phase: 'retrying' });
@@ -138,6 +146,6 @@ export class CodexTranslator extends EventEmitter {
         if (signal?.aborted) return abort();
         this.rpc('turn/start', { threadId: thread.id, environments: [], input: [{ type: 'text', text: buildPrompt(part, this.config.glossary) }], effort: this.config.effort, outputSchema }).then(r => { turnId = r.turn.id; if (settled) interrupt(); }).catch(e => finish(e));
       });
-    } finally { await this.rpc('thread/unsubscribe', { threadId: thread.id }, 3000).catch(() => {}); }
+    } finally { spent.usage = addUsage(spent.usage, tokens); await this.rpc('thread/unsubscribe', { threadId: thread.id }, 3000).catch(() => {}); }
   }
 }

@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { root } from './config.mjs';
 import { cacheKey, validateTranslation } from './translation.mjs';
-import { SubtitleDatabase, episodeHash } from './database.mjs';
+import { SubtitleDatabase, episodeHash, addUsage } from './database.mjs';
 
 export const EPISODE_VERSION = 4;
 const covered = segments => segments.reduce((n, segment) => n + segment.sourceIds.length, 0);
@@ -30,7 +30,7 @@ export class EpisodeManager {
     // An earlier failed/cancelled in-memory request must see a result completed by another mode.
     if (!episode.running) {
       const cached = this.database.get(request);
-      if (cached) { episode.segments = cached; episode.completedCues = request.cues.length; episode.status = 'done'; episode.cached = true; episode.error = ''; }
+      if (cached) { episode.segments = cached; episode.completedCues = request.cues.length; episode.status = 'done'; episode.cached = true; episode.error = ''; episode.usage = this.database.usage(request); }
     }
     if (this.cancelledRequests.has(`${request.client}|${request.epoch}`)) return { ...this.public(episode, 0), status: 'cancelled' };
     episode.lastAccess = Date.now();
@@ -44,7 +44,7 @@ export class EpisodeManager {
     await mkdir(this.directory, { recursive: true });
     const episode = { id, hash: episodeHash(request), request, segments: [], completedCues: 0, owners: new Map(), status: 'queued', running: false, cancelled: false, error: '', started: Date.now(), lastAccess: Date.now() };
     const cached = this.database.get(request);
-    if (cached) { episode.segments = cached; episode.completedCues = request.cues.length; episode.status = 'done'; episode.cached = true; }
+    if (cached) { episode.segments = cached; episode.completedCues = request.cues.length; episode.status = 'done'; episode.cached = true; episode.usage = this.database.usage(request); }
     this.episodes.set(id, episode);
     // Keep only a bounded number of inactive episode objects in RAM; complete results stay in SQLite.
     for (const [key, e] of this.episodes) if (this.episodes.size > 12 && key !== id && !e.running && e.owners.size === 0) this.episodes.delete(key);
@@ -52,19 +52,20 @@ export class EpisodeManager {
   // Accepted translations are stored by cue position, so they also apply when cue IDs change.
   progressKey(e) { return `${e.hash}|${e.request.provider || 'codex'}`; }
   recall(e) { return this.database.partial(e.request); }
-  // Writes the accepted prefix at most once a second while streaming; `flush` writes the last one.
-  remember(e, segments) { e.unsaved = segments; if (Date.now() - (e.savedAt || 0) >= 1000) this.flush(e); }
+  // Writes the accepted prefix and the tokens used so far at most once a second while streaming;
+  // `flush` writes the last state.
+  remember(e, changes) { Object.assign(e, changes); e.dirty = true; if (Date.now() - (e.savedAt || 0) >= 1000) this.flush(e); }
   flush(e) {
-    if (!e.unsaved) return;
-    const segments = e.unsaved; e.unsaved = null; e.savedAt = Date.now();
-    try { this.database.save(e.request, segments); } catch (error) { console.error(`Could not save progress: ${error.message}`); }
+    if (!e.dirty) return;
+    e.dirty = false; e.savedAt = Date.now();
+    try { this.database.save(e.request, e.accepted || [], { usage: e.usage }); } catch (error) { console.error(`Could not save progress: ${error.message}`); }
   }
   public(e, after = 0) {
     if (!e) return undefined;
     const start = Math.max(0, Math.min(e.segments.length, Number(after) || 0));
     const segments = e.segments.slice(start, start + 1000);
     const progress = e.progress;
-    return { id: e.id, status: e.status, hash: e.hash, cached: !!e.cached, totalCues: e.request.cues.length, completedCues: e.completedCues, segments, cursor: start + segments.length, segmentCount: e.segments.length, error: e.error, progress, elapsedMs: (e.finished || Date.now()) - e.started };
+    return { id: e.id, status: e.status, hash: e.hash, cached: !!e.cached, totalCues: e.request.cues.length, completedCues: e.completedCues, segments, cursor: start + segments.length, segmentCount: e.segments.length, error: e.error, progress, usage: e.usage || null, elapsedMs: (e.finished || Date.now()) - e.started };
   }
   get(id, after) { const e = this.episodes.get(id); if (e) e.lastAccess = Date.now(); return this.public(e, after); }
   cancel(client, epoch) {
@@ -88,7 +89,9 @@ export class EpisodeManager {
     if (e.running) return;
     e.running = true; e.status = 'queued'; e.started = Date.now(); e.finished = null;
     let accepted = this.recall(e);
-    e.segments = [...accepted]; e.completedCues = covered(accepted);
+    e.segments = [...accepted]; e.completedCues = covered(accepted); e.accepted = accepted;
+    // Tokens of earlier, interrupted runs; this run's are added as Codex reports them.
+    const baseUsage = this.database.usage(e.request, { partial: true }); e.usage = baseUsage;
     // While a better provider replaces an existing complete result, keep showing that result.
     const preview = !accepted.length && this.database.get(e.request, { fallback: true });
     if (preview) e.segments = preview;
@@ -97,12 +100,13 @@ export class EpisodeManager {
         while (['queued', 'running'].includes(job.status)) {
           e.status = job.status;
           if (job.progress) {
-            const { partialSegments, ...progress } = job.progress;
+            const { partialSegments, usage, ...progress } = job.progress;
             e.progress = progress;
+            if (usage) this.remember(e, { usage: addUsage(baseUsage, usage) });
             if (partialSegments?.length > accepted.length) {
               const count = covered(partialSegments);
               accepted = validateTranslation({ segments: partialSegments }, e.request.cues.slice(0, count));
-              this.remember(e, accepted);
+              this.remember(e, { accepted });
               if (!preview) { e.segments = accepted; e.completedCues = count; }
             }
           }
@@ -114,7 +118,7 @@ export class EpisodeManager {
         if (!e.cancelled) {
           if (job.status !== 'done') throw new Error(job.error || 'Episode translation cancelled');
           const complete = validateTranslation({ segments: job.segments }, e.request.cues);
-          e.unsaved = null; this.database.put(e.request, complete);
+          e.dirty = false; this.database.put(e.request, complete, e.usage);
           e.segments = this.database.get(e.request) || complete;
           e.completedCues = e.request.cues.length;
         }
