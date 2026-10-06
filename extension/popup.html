@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart Subtitles for Hulu</title><link rel="stylesheet" href="popup.css"></head>
+<body><main>
+  <header>
+    <img src="icon.svg" alt="" width="32" height="32">
+    <h1>Smart Subtitles<small>for Hulu</small></h1>
+    <label class="switch" title="Show bilingual subtitles"><input id="enabled" type="checkbox" role="switch" aria-label="Show bilingual subtitles"><span aria-hidden="true"></span></label>
+  </header>
+  <div class="row"><label for="target">Language</label><select id="target"></select></div>
+  <div class="row" id="providerRow" hidden><label for="provider">Translator</label><select id="provider"></select></div>
+  <div class="row"><label for="fontSize">Size</label><input id="fontSize" type="range" min="18" max="100" step="1" value="60"><output id="fontSizeValue" for="fontSize">60</output></div>
+  <form id="pair" hidden>
+    <p>Enter the pairing code shown when you run <b>Start Subtitles.cmd</b>.</p>
+    <input id="pairCode" autocomplete="off" spellcheck="false" placeholder="Pairing code"><button>Connect</button>
+    <p id="pairError" hidden></p>
+  </form>
+  <section aria-live="polite">
+    <p id="status">Connecting…</p><span id="count" hidden></span>
+    <progress id="progress" max="100" value="0" hidden></progress>
+    <p id="detail" hidden></p>
+    <button id="retry" hidden>Retry</button>
+  </section>
+  <footer><a id="legal" href="legal.html">Terms &amp; Privacy</a> · Not affiliated with Hulu</footer>
+</main><script src="popup.js" type="module"></script></body></html>

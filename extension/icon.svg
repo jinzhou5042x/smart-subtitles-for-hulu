@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Green tile with a screen outline and two subtitle lines (original, translation). -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="#13a865"/>
+  <rect x="21" y="27" width="86" height="74" rx="14" fill="none" stroke="#fff" stroke-width="8"/>
+  <rect x="37" y="68" width="54" height="9" rx="4.5" fill="#fff"/>
+  <rect x="47" y="82" width="34" height="9" rx="4.5" fill="#fff" opacity=".7"/>
+</svg>

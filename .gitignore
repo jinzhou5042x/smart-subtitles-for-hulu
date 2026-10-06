@@ -1,0 +1,11 @@
+config/local.json
+data/
+logs/
+dist/
+models/
+runtime/
+codex/
+node/
+node_modules/
+*.sqlite
+local-connection.json

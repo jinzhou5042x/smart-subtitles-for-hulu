@@ -1,0 +1,10 @@
+{
+  "port": 43127,
+  "codexPath": "codex",
+  "model": "gpt-6-luna",
+  "effort": "low",
+  "glossary": {},
+  "providers": [
+    "codex"
+  ]
+}
