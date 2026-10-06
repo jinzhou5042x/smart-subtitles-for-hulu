@@ -22,7 +22,12 @@ for (const script of manifest.content_scripts) script.matches = script.matches.f
 await writeFile(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
 
 const zip = path.join(out, `smart-subtitles-for-hulu-${manifest.version}.zip`);
-execFileSync('powershell.exe', ['-NoProfile', '-Command', `Compress-Archive -Path '${staging}\\*' -DestinationPath '${zip}' -Force`], { stdio: 'inherit' });
+// Windows' bsdtar writes standard zip entries (forward slashes). PowerShell 5.1 Compress-Archive writes
+// "icons\icon-16.png", which the Chrome Web Store rejects ("No manifest found in package").
+const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+execFileSync(tar, ['-a', '-c', '-f', zip, '-C', staging, ...(await readdir(staging))], { stdio: 'inherit' });
+const entries = execFileSync(tar, ['-t', '-f', zip], { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean);
+if (!entries.includes('manifest.json') || entries.some(e => e.includes('\\'))) throw new Error('The zip must have manifest.json at its root and forward-slash paths');
 
 const files = await readdir(staging, { recursive: true });
 if (files.some(file => /local-connection\.json$/.test(file))) throw new Error('The pairing file must not be packaged');
