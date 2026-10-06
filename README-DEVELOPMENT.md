@@ -107,6 +107,8 @@ Ad breaks: Hulu plays ads in a separate player while the episode stands still, s
 
 The local demo video is for development only; the product always overlays native Hulu video. See `docs/VALIDATION.md`.
 
+User research (complaints about dual-subtitle tools, competitors, Hulu's web player and its corner cases) and the resulting priorities: `docs/research/user-pain-points.md`, with sources in `docs/research/notes/`. Notes for coding agents: `CLAUDE.md`.
+
 ## Legal
 
 - **Terms of Use, Privacy Policy and third-party notices:** `extension/legal.html`, opened from the popup ("Terms & Privacy"). The same file can be hosted as the privacy policy URL required by the Chrome Web Store.
