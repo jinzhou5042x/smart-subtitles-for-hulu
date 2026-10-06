@@ -8,7 +8,7 @@ A local Windows service plus a Chrome extension that shows bilingual subtitles o
 
 1. Double-click **Start Subtitles.cmd** to start the service (**Check Environment.cmd** checks Node, Codex and the service).
 2. In Chrome open `chrome://extensions/`, enable developer mode and load the `dist\extension` folder of this project (created by `npm run build` or the start script).
-3. After an update, click the extension's reload icon and refresh the Hulu page. Current version: **0.9.1**.
+3. After an update, click the extension's reload icon and refresh the Hulu page. Current version: **0.9.2**.
 4. The popup has the subtitle toggle, the target language, the translator and episode progress; on failure it offers a retry.
 5. Drag the subtitle lines with the mouse to move them up or down (vertical only). The position is kept as a share of the picture height, across full screen, episodes and reloads. Dragging never reaches the player.
 
@@ -75,6 +75,27 @@ The service listens only on `127.0.0.1:43127`; private endpoints require the ran
 Supported subtitles: SRT/VTT and common TTML (inherited timing and nested span timing). Not supported: segmented VTT time mapping, sequential TTML, drop-frame timecodes, SAMI, audio-only recognition. The extension never downloads video or decryption keys.
 
 Restart the service after changing configuration; double-click **Stop Subtitles.cmd** to stop it.
+
+## Code layout
+
+| Part | Files | Role |
+| --- | --- | --- |
+| Site profile | `extension/site.js` | Everything that depends on Hulu's web player: episode pages, the episode `<video>`, ad breaks, the timeline. Change only this file when Hulu changes its player or another site is added. |
+| Subtitle discovery | `extension/capture.js` (page world) | Reads subtitle files the player loads or lists: playback JSON, HLS (segmented WebVTT, `X-TIMESTAMP-MAP`), DASH text tracks, `<track>`. |
+| Parsing | `extension/core.js`, `extension/ttml.js` | VTT/SRT/TTML parsing, timing, picture geometry. |
+| Overlay and episode flow | `extension/content.js` | Picks the complete English file, requests the translation, draws the two lines, reports status to the popup. |
+| Popup | `extension/popup.*` | Settings, status, progress and token usage; light and dark. |
+| Background | `extension/background.js` | Settings storage, pairing, the only code that talks to the service. |
+| Service | `service/server.mjs`, `episodes.mjs`, `jobs.mjs`, `database.mjs` | HTTP API on 127.0.0.1, per-episode state, up to `maxAgents` (16) translations at once, SQLite. |
+| Translators | `service/codex.mjs`, `google.mjs`, `local*.mjs`, `translation.mjs` | Codex app-server threads (token usage included), Google, local model; prompts and validation. |
+
+Ad breaks: Hulu plays ads in a separate player while the episode stands still, so subtitle times stay on the episode's clock. The overlay hides during every ad break (pre-roll and mid-roll, also while an ad is paused) and the popup waits for the episode to start before it reports that no subtitles were found.
+
+## Releasing
+
+1. `npm run bump -- 0.9.3` sets the version in `package.json` (read by the service) and `extension/manifest.json` (read by the extension).
+2. `npm test` (also run by GitHub Actions on every push).
+3. `npm run package` and `node scripts/store-assets.mjs` for the Chrome Web Store; `npm run release` for the Windows service zip.
 
 ## Development
 

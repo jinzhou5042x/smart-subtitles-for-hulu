@@ -2,18 +2,21 @@
   if (location.hostname === '127.0.0.1' && location.pathname !== '/demo') return;
   if (globalThis.__huluContextSubtitles) return;
   globalThis.__huluContextSubtitles = true;
-  const C = globalThis.SubtitleCore;
-  let settings, video, epoch = crypto.randomUUID(), page = location.pathname;
+  const C = globalThis.SubtitleCore, site = globalThis.SubtitleSite, version = chrome.runtime.getManifest().version;
+  let settings, video, epoch = crypto.randomUUID(), page = site.episodeKey();
   let candidates = [], selected = null, imported = null, cues = [], translations = new Map();
   let episode = null, cursor = 0, busy = false, complete = false, lastScan = 0, retryAt = 0;
   let source = 'Waiting for the episode subtitles', status = 'Fetching the episode subtitles', error = '', captureError = '', timingInfo = '';
-  let capture = {}, acquisitionStarted = Date.now();
+  // contentStarted: when the episode itself (not an ad) first played on this page. Hulu loads the
+  // episode's subtitles only then, so waiting is counted from it, never during pre-roll ads.
+  let capture = {}, contentStarted = 0;
   const durationLabel = seconds => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
-  function videoDuration() { return C.mediaDuration(video?.duration, document.querySelector('.Timeline__slider[aria-label="Timeline"]')?.getAttribute('aria-valuemax')); }
+  function videoDuration() { return C.mediaDuration(video?.duration, site.timelineSeconds()); }
   function progressInfo() {
-    const seconds = Math.floor((Date.now() - acquisitionStarted) / 1000);
+    const seconds = contentStarted ? Math.floor((Date.now() - contentStarted) / 1000) : 0;
     const waiting = seconds >= 20;
-    if (complete) return { status: episode?.cached ? 'Loaded from the local database' : 'Episode subtitles ready', detail: 'Synced to the original timing' };
+    const checked = [capture.metadata && `${capture.metadata} playback info`, capture.manifests && `${capture.manifests} stream manifests`].filter(Boolean).join(' · ');
+    if (complete) return { status: episode?.cached ? 'Loaded from the local database' : 'Episode subtitles ready', detail: site.adBreak() ? 'Ad break · subtitles return with the episode' : 'Synced to the original timing' };
     if (error) return { status: 'Translation paused', detail: error, retry: true };
     if (!video) return { status: 'Waiting for a Hulu video', detail: '' };
     if (selected) {
@@ -30,6 +33,9 @@
       }
       return { status: episode.status === 'done' ? 'Syncing the full translation' : episode.status === 'queued' ? 'Episode translation queued' : (settings.provider === 'local' ? 'The local model is translating the episode' : settings.provider === 'google' ? 'Google is translating the episode' : 'Codex is translating the episode'), detail: '' };
     }
+    // Pre-roll ads: the episode's subtitles are only requested once the episode starts.
+    if (site.adBreak()) return { status: 'Waiting for the ads to finish', detail: 'Subtitles load when the episode starts' };
+    if (!contentStarted && !candidates.length && !capture.pending) return { status: 'Waiting for the episode to start', detail: '' };
     if (capture.pending > 0) return { status: 'Reading subtitle files', detail: `${capture.pending} pending · ${capture.received || 0} received`, retry: waiting };
     if (candidates.length) {
       if (!videoDuration()) return { status: 'Subtitles parsed, waiting for the player timeline', detail: `${candidates.length} subtitle files · video duration not available yet`, retry: waiting };
@@ -39,16 +45,25 @@
       return { status: 'Subtitle timing failed the completeness check', detail: `subtitles to ${durationLabel(end)} · video ${durationLabel(videoDuration())}`, retry: true };
     }
     if (captureError) return { status: 'Could not read or parse the subtitles', detail: captureError, retry: true };
-    if (capture.metadata) return { status: 'Playback info checked, no subtitle link found', detail: `${capture.metadata} playback info responses · waited ${seconds} s${waiting ? '; reload the video to try again' : ''}`, retry: waiting };
-    return { status: 'Video detected, waiting for subtitles', detail: `no playback info or subtitle file yet · ${seconds} s${waiting ? '; reload the video to retry' : ''}`, retry: waiting };
+    if (checked) return { status: waiting ? 'No subtitle file found for this episode' : 'Looking for the episode subtitles', detail: `Checked ${checked} · ${seconds} s${waiting ? ' · turn on captions in the player, or reload the video' : ''}`, retry: waiting };
+    return { status: waiting ? 'No playback information received' : 'Waiting for the episode subtitles', detail: waiting ? 'Reload the video to try again' : '', retry: waiting };
   }
   const host = document.createElement('div'); host.id = 'hulu-context-subtitles';
   const shadow = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
-  style.textContent = `:host{all:initial;position:fixed;z-index:2147483646;pointer-events:none;display:none}*{box-sizing:border-box}.wrap{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-end;flex-direction:column;padding:0 2% 5%;text-align:center;font-family:"Microsoft YaHei",system-ui,sans-serif}.line{display:flex;align-items:center;justify-content:center;text-align:center;max-width:none;width:max-content;flex-shrink:0;white-space:nowrap;line-height:1.15;border-radius:5px;text-shadow:0 2px 4px #000;background:#090d12bf;padding:2px 10px;color:#fff;font-size:var(--subtitle-size,26px);font-weight:600}.original{font-size:var(--original-size,18px);color:#f1f1f1;margin-top:calc(var(--original-size,18px)*.3);font-weight:400;line-height:1.15}.line:empty{display:none}.line{pointer-events:auto;cursor:grab;user-select:none;touch-action:none}.dragging .line{cursor:grabbing}.badge{position:absolute;top:16px;left:16px;color:#fff;background:#101820b5;padding:6px 10px;border-radius:6px;font:12px system-ui}.badge:empty{display:none}`;
+  // Each line sits on its own soft, blurred backing; the translation leads and the original follows
+  // smaller and lighter. Padding and corners are in em, so they scale with the chosen size.
+  style.textContent = `:host{all:initial;position:fixed;z-index:2147483646;pointer-events:none;display:none}*{box-sizing:border-box}
+.wrap{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-end;flex-direction:column;padding:0 2% 5%;text-align:center;font-family:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"PingFang SC","Hiragino Sans","Microsoft YaHei UI","Microsoft YaHei","Noto Sans CJK SC",sans-serif;-webkit-font-smoothing:antialiased}
+.line{display:flex;align-items:center;justify-content:center;text-align:center;max-width:none;width:max-content;flex-shrink:0;white-space:nowrap;unicode-bidi:plaintext;line-height:1.22;border-radius:.22em;padding:.1em .5em .14em;color:#fff;font-size:var(--subtitle-size,26px);font-weight:600;letter-spacing:.005em;background:rgba(10,12,16,.58);-webkit-backdrop-filter:blur(8px) saturate(1.2);backdrop-filter:blur(8px) saturate(1.2);box-shadow:0 .08em .5em rgba(0,0,0,.22),inset 0 0 0 1px rgba(255,255,255,.06);text-shadow:0 1px 2px rgba(0,0,0,.6);transition:box-shadow .15s}
+.original{font-size:var(--original-size,18px);color:rgba(255,255,255,.88);margin-top:calc(var(--original-size,18px)*.3);font-weight:450;background:rgba(10,12,16,.42)}
+.line:empty{display:none}.line{pointer-events:auto;cursor:grab;user-select:none;touch-action:none}
+.dragging .line{cursor:grabbing;box-shadow:0 .08em .5em rgba(0,0,0,.22),inset 0 0 0 1px rgba(255,255,255,.06),0 0 0 2px rgba(47,194,125,.65)}
+.badge{position:absolute;top:16px;left:16px;color:#fff;background:#101820b5;padding:6px 10px;border-radius:6px;font:12px system-ui}.badge:empty{display:none}`;
   const wrap = document.createElement('div'); wrap.className = 'wrap';
-  const translatedLine = document.createElement('div'); translatedLine.className = 'line';
-  const originalLine = document.createElement('div'); originalLine.className = 'line original';
+  // dir=auto with unicode-bidi:plaintext lays out right-to-left translations (Arabic, Hebrew, Persian) correctly.
+  const translatedLine = document.createElement('div'); translatedLine.className = 'line'; translatedLine.dir = 'auto';
+  const originalLine = document.createElement('div'); originalLine.className = 'line original'; originalLine.dir = 'ltr';
   const badge = document.createElement('div'); badge.className = 'badge';
   // The subtitle lines can be dragged vertically. The position is stored as a fraction of the
   // picture height, so it follows resizing and full screen. Events on the lines never reach the
@@ -106,16 +121,9 @@
   function newPage() {
     window.postMessage({ type: 'hulu-context-stop' }, location.origin);
     window.postMessage({ type: 'hulu-context-resume' }, location.origin);
-    capture = {}; acquisitionStarted = Date.now();
+    capture = {}; contentStarted = 0;
     clearTranslation(); selected = null; imported = null; cues = []; candidates = []; captureError = ''; timingInfo = ''; source = 'Waiting for the episode subtitles'; status = 'Fetching the episode subtitles';
   }
-  function findVideo() {
-    if (location.hostname !== '127.0.0.1' && !location.pathname.startsWith('/watch/')) return undefined;
-    const content = document.querySelector('#content-video-player');
-    if (content) return content.getBoundingClientRect().width > 0 ? content : undefined;
-    return [...document.querySelectorAll('video')].filter(v => v.getBoundingClientRect().width > 200).sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
-  }
-  function adPlaying() { const ad = document.querySelector('#ad-video-player'); return !!ad && !ad.paused && ad.readyState > 1; }
   function entireFile(file) {
     const duration = videoDuration();
     if (!video || !duration) return false;
@@ -179,13 +187,13 @@
     const fontSize = Math.max(18, Math.min(100, Number(settings?.fontSize) || 60));
     host.style.setProperty('--subtitle-size', `${fontSize}px`);
     host.style.setProperty('--original-size', `${Math.round(fontSize * 0.7)}px`);
-    host.dataset.version = '0.9.1'; host.dataset.source = source; host.dataset.cues = String(cues.length); host.dataset.translated = String(translations.size);
+    host.dataset.version = version; host.dataset.source = source; host.dataset.cues = String(cues.length); host.dataset.translated = String(translations.size);
     const progress = progressInfo(); status = progress.status; host.dataset.detail = progress.detail;
     host.dataset.status = status; host.dataset.error = error; host.dataset.captured = String(candidates.length); host.dataset.captureError = captureError; host.dataset.timingInfo = timingInfo;
     host.dataset.complete = String(complete); host.dataset.episode = episode?.id || '';
     host.dataset.files = JSON.stringify(candidates.map(f => ({ name: f.name, language: f.language, count: f.cues.length, end: f.cues.at(-1)?.end })));
-    if (!settings?.enabled || !video || adPlaying()) { host.style.display = 'none'; return; }
-    const parent = document.fullscreenElement || document.body; if (parent && host.parentNode !== parent) parent.append(host);
+    if (!settings?.enabled || !video || site.adBreak()) { host.style.display = 'none'; return; }
+    const parent = site.overlayParent(); if (parent && host.parentNode !== parent) parent.append(host);
     const videoStyle = getComputedStyle(video);
     const bounds = video.getBoundingClientRect();
     const rect = videoStyle.objectPosition === '50% 50%' ? C.pictureRect(bounds, video.videoWidth, video.videoHeight, videoStyle.objectFit) : bounds;
@@ -201,11 +209,12 @@
     if (!settings) return;
     if (Date.now() - lastScan > 750) {
       lastScan = Date.now();
-      if (page !== location.pathname) { page = location.pathname; newPage(); }
-      const nextVideo = findVideo();
+      if (page !== site.episodeKey()) { page = site.episodeKey(); newPage(); }
+      const nextVideo = site.contentVideo();
       if (video && !nextVideo) { newPage(); window.postMessage({ type: 'hulu-context-stop' }, location.origin); }
       if (!video && nextVideo) window.postMessage({ type: 'hulu-context-resume' }, location.origin);
       video = nextVideo; if (video && settings.enabled) acquire();
+      if (video && !contentStarted && !site.adBreak() && !video.paused && video.currentTime > 0.5) contentStarted = Date.now();
     }
     render(); void prepareEpisode();
   }
@@ -218,7 +227,7 @@
       const info = progressInfo(), working = !!episode && ['queued', 'running'].includes(episode.status);
       // tone: done, working, error or waiting; the popup draws the progress, time and tokens from these fields.
       const tone = complete ? 'done' : error ? 'error' : working ? 'working' : info.retry ? 'error' : 'waiting';
-      respond({ version: '0.9.1', video: !!video, source, total: cues.length, translated: translations.size, complete, busy, ...info, tone, cached: !!episode?.cached, elapsedMs: episode && !episode.cached ? episode.elapsedMs : null, usage: episode?.usage || null, error, captureError, episodeId: episode?.id, files: candidates.map(f => ({ name: f.name, language: f.language, cues: f.cues.length })) });
+      respond({ version, video: !!video, source, total: cues.length, translated: translations.size, complete, busy, ...info, tone, cached: !!episode?.cached, elapsedMs: episode && !episode.cached ? episode.elapsedMs : null, usage: episode?.usage || null, error, captureError, episodeId: episode?.id, files: candidates.map(f => ({ name: f.name, language: f.language, cues: f.cues.length })) });
     } else if (m.type === 'retry') { error = ''; retryAt = 0; window.postMessage({ type: 'hulu-context-replay' }, location.origin); respond({ ok: true }); }
     else if (m.type === 'importSubtitles') {
       try { const list = C.parseSubtitles(m.text); imported = { cues: list, fingerprint: C.hash(m.text) }; adopt(imported, 'Imported episode subtitles'); respond({ ok: true, count: list.length }); }
@@ -228,13 +237,13 @@
   window.addEventListener('message', e => {
     if (e.source !== window || e.origin !== location.origin) return;
     if (e.data?.type === 'hulu-context-progress' && e.data.page === location.pathname) {
-      if (page !== location.pathname) { page = location.pathname; newPage(); }
-      for (const key of ['metadata', 'found', 'pending', 'received']) capture[key] = Math.max(0, Math.min(40000, Number(e.data[key]) || 0));
+      if (page !== site.episodeKey()) { page = site.episodeKey(); newPage(); }
+      for (const key of ['metadata', 'manifests', 'found', 'pending', 'received']) capture[key] = Math.max(0, Math.min(40000, Number(e.data[key]) || 0));
       return;
     }
     if (e.data?.type === 'hulu-context-capture-error' && e.data.page === location.pathname) { captureError = String(e.data.error).slice(0, 200); return; }
     if (e.data?.type !== 'hulu-context-captured' || e.data.page !== location.pathname || typeof e.data.text !== 'string' || e.data.text.length > 5_000_000) return;
-    if (page !== location.pathname) { page = location.pathname; newPage(); }
+    if (page !== site.episodeKey()) { page = site.episodeKey(); newPage(); }
     const fingerprint = C.hash(e.data.text); if (candidates.some(f => f.fingerprint === fingerprint)) return;
     try {
       let parsed, language = String(e.data.language || '').slice(0, 40);

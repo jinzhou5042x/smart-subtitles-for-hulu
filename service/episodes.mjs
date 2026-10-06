@@ -40,7 +40,8 @@ export class EpisodeManager {
     } finally { this.pendingRequests.delete(request); }
   }
   async load(id, request) {
-    if ([...this.episodes.values()].filter(e => e.running).length >= 4) throw new Error('Too many active episodes');
+    // As many as the job queue holds: maxAgents translating at once and more waiting their turn.
+    if ([...this.episodes.values()].filter(e => e.running).length >= (this.config.maxAgents || 16) + 24) throw new Error('Too many videos are being translated; close some and try again');
     await mkdir(this.directory, { recursive: true });
     const episode = { id, hash: episodeHash(request), request, segments: [], completedCues: 0, owners: new Map(), status: 'queued', running: false, cancelled: false, error: '', started: Date.now(), lastAccess: Date.now() };
     const cached = this.database.get(request);

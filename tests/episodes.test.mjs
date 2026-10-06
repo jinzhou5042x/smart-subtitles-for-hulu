@@ -242,3 +242,42 @@ test('tokens of interrupted runs are kept and added to the complete translation'
     assert.equal(loaded.cached, true); assert.deepEqual(loaded.usage, total);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('16 videos translate at once; closing one tab stops only its translation and a reload resumes it', async () => {
+  const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
+  const episode = k => ['One.', 'Two.', 'Three.'].map((text, i) => ({ id: `${k}-${i}`, start: i * 2, end: i * 2 + 1, text: `Video ${k}: ${text}` }));
+  let active = 0, peak = 0; const aborted = [], resumedFrom = [];
+  const queue = new JobQueue({ translate: async (r, signal, progress) => {
+    active++; peak = Math.max(peak, active);
+    try {
+      if (r.accepted.length) { resumedFrom.push(r.accepted.length); return [...r.accepted, ...r.cues.slice(r.accepted.length).map(c => ({ sourceIds: [c.id], text: '译' + c.id, start: c.start, end: c.end }))]; }
+      progress({ phase: 'receiving', partialSegments: [{ sourceIds: [r.cues[0].id], text: '译' + r.cues[0].id, start: 0, end: 1 }] });
+      await new Promise((resolve, reject) => signal.addEventListener('abort', () => { aborted.push(r.cues[0].id); reject(new Error('cancelled')); }, { once: true }));
+    } finally { active--; }
+  } }, { maxAgents: 16 });
+  const manager = new EpisodeManager(queue, { maxAgents: 16 }, dir);
+  const request = k => ({ client: `tab-${k}-0`, epoch: '1', session: `https://www.hulu.com/watch/${k}`, provider: 'codex', target: 'zh-CN', context: [], cues: episode(k) });
+  try {
+    // One at a time, so video 16 is the one that reaches the queue last and waits.
+    const opened = [];
+    for (let k = 0; k < 17; k++) opened.push(await manager.submit(request(k)));
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(queue.running, 16); assert.equal(peak, 16);
+    assert.equal(manager.get(opened[16].id).status, 'queued');
+    // Close tab 3: only its translation stops; its first line is saved.
+    manager.cancelTab(3); await manager.episodes.get(opened[3].id).task;
+    assert.deepEqual(aborted, ['3-0']); assert.equal(manager.get(opened[3].id).status, 'cancelled');
+    assert.deepEqual(manager.database.partial(request(3)).map(s => s.text), ['译3-0']);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(manager.get(opened[16].id).status, 'running'); // the waiting video took the free slot
+    // Reload tab 3: all 16 slots are busy, so it waits; when tab 5 closes it resumes after the saved line.
+    const reloaded = await manager.submit({ ...request(3), epoch: '2' });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(manager.get(reloaded.id).status, 'queued'); assert.deepEqual(resumedFrom, []);
+    manager.cancelTab(5); await manager.episodes.get(reloaded.id).task;
+    assert.deepEqual(resumedFrom, [1]);
+    assert.deepEqual(manager.get(reloaded.id).segments.map(s => s.text), ['译3-0', '译3-1', '译3-2']);
+    for (let k = 0; k < 17; k++) if (k !== 3) manager.cancelTab(k);
+    await Promise.all([...manager.episodes.values()].map(e => e.task));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

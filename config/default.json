@@ -6,5 +6,6 @@
   "glossary": {},
   "providers": [
     "codex"
-  ]
+  ],
+  "maxAgents": 16
 }

@@ -90,6 +90,6 @@ The page is published from https://github.com/jinzhou5042x/smart-subtitles-for-h
 ## Before every release
 
 1. `npm test`
-2. Bump the version (package.json, extension/manifest.json, extension/content.js, service/server.mjs, README).
+2. `npm run bump -- <version>` (package.json and extension/manifest.json; everything else reads them).
 3. `npm run package` and `node scripts/store-assets.mjs`
 4. Upload the new zip under **Package → Upload new package**, then submit for review.

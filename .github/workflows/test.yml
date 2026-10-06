@@ -1,0 +1,16 @@
+name: Test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - name: Check that the extension scripts parse
+        run: for f in extension/*.js; do node --check "$f" 2>/dev/null || node --input-type=module --check < "$f"; done

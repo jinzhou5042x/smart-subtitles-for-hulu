@@ -17,9 +17,10 @@ export function codexCommand(config) {
   return { command: parts[0], prefix: parts.slice(1) };
 }
 
-// A long-lived official app-server process; no shell command interpolation.
+// A long-lived official app-server process; no shell command interpolation. Concurrent translations
+// (up to config.maxAgents) each run in their own thread and filter the shared notifications by thread.
 export class CodexTranslator extends EventEmitter {
-  constructor(config) { super(); this.config = config; this.pending = new Map(); this.nextId = 0; this.ready = null; }
+  constructor(config) { super(); this.setMaxListeners(0); this.config = config; this.pending = new Map(); this.nextId = 0; this.ready = null; }
   async start() {
     if (this.ready) return this.ready;
     this.ready = this.initialize().catch(e => { this.close(); throw e; });

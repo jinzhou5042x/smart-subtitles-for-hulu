@@ -75,12 +75,14 @@ async function refresh() {
 }
 try {
   const settings = await call({ type: 'settings' }); $('enabled').checked = settings.enabled; $('target').value = settings.target; wantedProvider = settings.provider || 'codex';
-  $('fontSize').value = settings.fontSize; $('fontSizeValue').textContent = $('fontSize').value;
+  // The slider's filled part follows its value (popup.css draws it from --fill).
+  const paintSize = () => { const r = $('fontSize'); r.style.setProperty('--fill', `${(r.value - r.min) / (r.max - r.min) * 100}%`); $('fontSizeValue').textContent = r.value; };
+  $('fontSize').value = settings.fontSize; paintSize();
   const save = saveSettings = async () => { try { await call({ type: 'saveSettings', settings: { enabled: $('enabled').checked, target: $('target').value, provider: $('provider').value || wantedProvider } }); await refresh(); } catch (e) { showError(e.message); } };
   $('enabled').onchange = save; $('target').onchange = save; $('provider').onchange = () => { wantedProvider = $('provider').value; limitLanguages(); return save(); };
   let sizeTimer;
   $('fontSize').oninput = () => {
-    $('fontSizeValue').textContent = $('fontSize').value;
+    paintSize();
     clearTimeout(sizeTimer);
     sizeTimer = setTimeout(() => call({ type: 'saveSettings', settings: { fontSize: Number($('fontSize').value) } }).catch(e => showError(e.message)), 80);
   };

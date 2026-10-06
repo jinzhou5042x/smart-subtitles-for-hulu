@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { readFile, appendFile, access } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, root } from './config.mjs';
@@ -8,6 +9,8 @@ import { JobQueue } from './jobs.mjs';
 import { EpisodeManager } from './episodes.mjs';
 import { validateRequest } from './translation.mjs';
 
+// The version comes from package.json (scripts/version.mjs keeps it in step with the extension).
+export const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 export const isExtensionOrigin = origin => /^chrome-extension:\/\/[a-p]{32}$/.test(origin || '');
 // Translators are loaded only when enabled in config.providers (the release enables Codex only).
 const TRANSLATORS = {
@@ -43,7 +46,7 @@ export function createServer(config, queue, episodes) {
       res.setHeader('Access-Control-Allow-Private-Network', 'true'); res.writeHead(204); return res.end();
     }
     const url = new URL(req.url, `http://127.0.0.1:${config.port}`);
-    if (req.method === 'GET' && url.pathname === '/health') return json(200, { app: 'hulu-context-subtitles', version: '0.9.1', ready: true });
+    if (req.method === 'GET' && url.pathname === '/health') return json(200, { app: 'hulu-context-subtitles', version, ready: true });
     // Development only: the demo clip is served when tests/fixtures exists (not in the release).
     const publicFiles = { '/demo': 'tests/fixtures/demo.html', '/demo.vtt': 'tests/fixtures/demo.vtt', '/demo.mp4': 'tests/fixtures/demo.mp4' };
     if (req.method === 'GET' && publicFiles[url.pathname] && await access(path.join(root, 'tests/fixtures')).then(() => true, () => false)) {
@@ -61,7 +64,7 @@ export function createServer(config, queue, episodes) {
     }
     if (!tokenMatches(req.headers.authorization, `Bearer ${config.pairingToken}`)) return json(401, { error: 'Pairing token required' });
     try {
-      if (req.method === 'GET' && url.pathname === '/status') return json(200, { app: 'hulu-context-subtitles', queued: [...queue.jobs.values()].filter(j => j.status === 'queued').length, running: queue.running, model: config.model || 'Codex default model', providers: enabledProviders(config) });
+      if (req.method === 'GET' && url.pathname === '/status') return json(200, { app: 'hulu-context-subtitles', queued: [...queue.jobs.values()].filter(j => j.status === 'queued').length, running: queue.running, maxAgents: queue.limit, model: config.model || 'Codex default model', providers: enabledProviders(config) });
       if (req.method === 'POST' && url.pathname === '/episodes' && episodes) {
         const request = validateRequest(await readJson(req, 8_000_000));
         if (!enabledProviders(config).includes(request.provider)) throw new Error(`The ${request.provider} translator is not enabled`);
@@ -103,7 +106,7 @@ async function main() {
   const server = createServer(config, queue, episodes);
   server.requestTimeout = 15000;
   server.on('error', e => { console.error(e.code === 'EADDRINUSE' ? `Port ${config.port} already in use. Run doctor.` : e.message); closeAll(); process.exitCode = 1; });
-  server.listen(config.port, '127.0.0.1', () => { console.log(`Smart Subtitles for Hulu service: http://127.0.0.1:${config.port} (${enabledProviders(config).join(', ')})`); void appendFile(path.join(root, 'logs/service.log'), `${new Date().toISOString()} started pid=${process.pid}\n`); });
+  server.listen(config.port, '127.0.0.1', () => { console.log(`Smart Subtitles for Hulu service: http://127.0.0.1:${config.port} (${enabledProviders(config).join(', ')}; up to ${queue.limit} videos at once)`); void appendFile(path.join(root, 'logs/service.log'), `${new Date().toISOString()} started pid=${process.pid}\n`); });
   const stop = () => { for (const job of queue.jobs.values()) job.controller.abort(); closeAll(); server.close(); setTimeout(() => process.exit(0), 500).unref(); };
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
 }
