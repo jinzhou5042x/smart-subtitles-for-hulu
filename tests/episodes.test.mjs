@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { root } from '../service/config.mjs';
 import { EpisodeManager } from '../service/episodes.mjs';
 import { JobQueue } from '../service/jobs.mjs';
+// data/ is gitignored, so a fresh clone does not have it yet.
+await mkdir(path.join(root, 'data'), { recursive: true });
 
 test('closing a tab cancels its running episode and prevents a pending submit from starting', async () => {
   const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
@@ -181,6 +183,32 @@ test('progress is found by subtitle hash: after a closed tab or reload, another 
     const second = await manager.submit(again); await manager.episodes.get(second.id).task;
     assert.deepEqual(sent, [[], ['nc0']]);
     assert.deepEqual(manager.get(second.id).segments.map(s => s.text), ['一', '二', '三']);
-    assert.equal(manager.progress.size, 0);
+    assert.deepEqual(manager.database.partial(again), []);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('accepted lines are stored as they arrive and a restarted service resumes after them', async () => {
+  const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
+  const cues = ['One.', 'Two.', 'Three.'].map((text, i) => ({ id: 'c' + i, start: i * 2, end: i * 2 + 1, text }));
+  const sent = [];
+  const stuck = new JobQueue({ translate: async (r, signal, progress) => {
+    sent.push(r.accepted.length);
+    progress({ phase: 'receiving', partialSegments: [{ sourceIds: ['c0'], text: '一', start: 0, end: 1 }] });
+    await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new Error('stopped')), { once: true }));
+  } }, {});
+  const request = { client: 'x-tab-1-0', epoch: '1', session: 's', provider: 'codex', target: 'zh-CN', context: [], cues };
+  try {
+    const before = new EpisodeManager(stuck, {}, dir);
+    const first = await before.submit(request);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    // Saved while still running, before any cancellation or error.
+    assert.deepEqual(before.database.partial(request).map(s => s.text), ['一']);
+    assert.equal(before.database.get(request), null);
+    before.cancel(request.client); await before.episodes.get(first.id).task;
+    const restarted = new EpisodeManager(new JobQueue({ translate: async r => { sent.push(r.accepted.length); return [...r.accepted, ...r.cues.slice(1).map(c => ({ sourceIds: [c.id], text: c.text, start: c.start, end: c.end }))]; } }, {}), {}, dir);
+    const again = await restarted.submit({ ...request, epoch: '2' }); await restarted.episodes.get(again.id).task;
+    assert.deepEqual(sent, [0, 1]);
+    assert.deepEqual(restarted.get(again.id).segments.map(s => s.text), ['一', 'Two.', 'Three.']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+

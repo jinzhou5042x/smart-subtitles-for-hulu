@@ -16,7 +16,7 @@ The toggle only affects the extension's own overlay. It never changes Hulu's cap
 
 ## Languages
 
-Subtitles are translated from English into any language of the shared list in `extension/languages.js` (about 55, default Chinese (Simplified)). A language is stored and sent as its code (`zh-CN`, `ja`, `es`, …), which is also the Google Cloud Translation code and part of the episode hash; prompts name it in English. Codex and Google support every listed language; the local Hy-MT2 model supports 37 of them, and the popup disables the others while the local translator is selected. Chinese, Cantonese and Japanese translations use full-width brackets for sound effects.
+Subtitles are translated from English into any language of the shared list in `shared/languages.js` (copied into the extension as `languages.js`) (about 55, default Chinese (Simplified)). A language is stored and sent as its code (`zh-CN`, `ja`, `es`, …), which is also the Google Cloud Translation code and part of the episode hash; prompts name it in English. Codex and Google support every listed language; the local Hy-MT2 model supports 37 of them, and the popup disables the others while the local translator is selected. Chinese, Cantonese and Japanese translations use full-width brackets for sound effects.
 
 ## Episode flow
 
@@ -28,9 +28,15 @@ When a video opens, the extension reads the complete subtitle file and timeline 
 
 Seeking past the translated part shows no bilingual subtitle until it is reached. Only a complete, validated episode enters the cache.
 
-## Translation cache
+## Translation database
 
-Progress of an unfinished episode is kept in the service's memory under the episode hash and the translator, independent of the page, tab or request. After a reload, a closed tab, a cancellation or an error such as a Codex usage limit, opening the same subtitles again resumes after the accepted translations instead of starting over. This progress is lost only if the service itself restarts. Nothing is written to disk while an episode is being translated. When the whole episode has been translated and validated, its source subtitles and translation are stored in one row of `data/episodes/subtitles.sqlite` (table `episodes`), whose primary key `hash` is the SHA-256 of the normalized subtitles (timing and text) and the target language. Video URLs and cue IDs do not matter.
+Translations are stored on this computer in `data/episodes/subtitles.sqlite`:
+
+- `sources`: one row per subtitle file. `hash` is the SHA-256 of the normalized subtitles (timing and text); `cues` holds their start, end and text, so an idx (0-based position) maps to its timestamps. Video URLs and cue IDs do not matter.
+- `translations`: per source `hash`, `target` language and `provider`, `done` (how many cues, counted from idx 0, are translated) and `complete`.
+- `lines`: the translated text per `(hash, target, provider, idx)`; `span` is 2 when the local model merged two cues into one line, otherwise 1.
+
+A translation is written while it streams (at most once a second, and once more when it stops), so it may end at any idx. After a reload, a closed tab, a cancellation, an error such as a Codex usage limit, or a restart of the service, opening the same subtitles again resumes after `done` instead of starting over; the last accepted lines are sent as context only. A complete translation is validated before it is marked complete and is never overwritten by the same provider. The 0.9.0 `episodes` table is migrated on first start.
 
 - The first complete result is reused by every mode, except that a **Codex** result replaces a local or Google one: Codex reads the whole episode at once, the others work batch by batch or line by line.
 - Switching to Codex on an episode already translated by another mode keeps showing that translation until the Codex result is complete, then replaces it.

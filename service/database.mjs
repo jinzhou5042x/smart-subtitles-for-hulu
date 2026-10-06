@@ -7,46 +7,100 @@ export const providerRank = provider => provider === 'codex' || !provider ? 2 : 
 export function subtitleHash(cues) {
   return createHash('sha256').update(JSON.stringify(cues.map(c => [c.start, c.end, c.text.normalize('NFC').replace(/\s+/g, ' ').trim()]))).digest('hex');
 }
-// Unique key of a stored episode: the normalized subtitles (timing and text) and the target language.
+// Identifies an episode translation in memory: the normalized subtitles (timing and text) and the target language.
 export const episodeHash = request => createHash('sha256').update(JSON.stringify([subtitleHash(request.cues), request.target])).digest('hex');
 
-// One row per completed episode: the source subtitles and their translation, written in a single
-// statement only after the whole episode has been translated and validated.
+// The local translation database (data/episodes/subtitles.sqlite):
+// - sources: one row per subtitle file, keyed by subtitleHash; its cues map an idx to timestamps.
+// - translations: per source, target language and provider, how many cues (`done`, a prefix
+//   from idx 0) are translated and whether the translation is complete.
+// - lines: the translated text by the idx of its first cue; `span` is 2 when a translator merged
+//   two cues into one line (local mode), otherwise 1.
+// A partial translation is written as it arrives, so it survives a restart of the service and is resumed.
 export class SubtitleDatabase {
   constructor(file, config) { this.file = file; this.config = config; }
   open() {
     const db = new DatabaseSync(this.file);
-    db.exec(`PRAGMA busy_timeout=5000;
-      CREATE TABLE IF NOT EXISTS episodes(hash TEXT PRIMARY KEY, target TEXT NOT NULL, provider TEXT NOT NULL, cues TEXT NOT NULL, segments TEXT NOT NULL, created_at TEXT NOT NULL);`);
+    db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
+      CREATE TABLE IF NOT EXISTS sources(hash TEXT PRIMARY KEY, cues TEXT NOT NULL, cue_count INTEGER NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS translations(hash TEXT NOT NULL, target TEXT NOT NULL, provider TEXT NOT NULL, done INTEGER NOT NULL, complete INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(hash, target, provider));
+      CREATE TABLE IF NOT EXISTS lines(hash TEXT NOT NULL, target TEXT NOT NULL, provider TEXT NOT NULL, idx INTEGER NOT NULL, span INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(hash, target, provider, idx));`);
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episodes'").get()) this.migrate(db);
     return db;
   }
-  // Returns the stored translation when it is at least as good as the requested provider.
-  // `fallback` also accepts a lower-ranked one, shown while a better one is produced.
-  get(request, { fallback = false } = {}) {
-    const db = this.open(), hash = episodeHash(request);
+  // Moves complete episodes of 0.9.0 (one row per subtitles + target) into the shared tables.
+  migrate(db) {
+    db.exec('BEGIN IMMEDIATE');
     try {
-      const row = db.prepare('SELECT provider, segments FROM episodes WHERE hash=?').get(hash);
-      if (!row || (!fallback && providerRank(row.provider) < providerRank(request.provider))) return null;
-      try {
-        const segments = JSON.parse(row.segments).map(s => ({ sourceIds: s.indices.map(i => request.cues[i]?.id), text: s.text }));
-        return validateTranslation({ segments }, request.cues);
-      } catch { db.prepare('DELETE FROM episodes WHERE hash=?').run(hash); return null; }
-    } finally { db.close(); }
-  }
-  // Stores a complete, validated episode. The first result is kept unless a higher-ranked provider
-  // completes later.
-  put(request, segments) {
-    const validated = validateTranslation({ segments }, request.cues);
-    const index = new Map(request.cues.map((c, i) => [c.id, i]));
-    const stored = validated.map(s => ({ indices: s.sourceIds.map(id => index.get(id)), text: s.text }));
-    const cues = request.cues.map(({ start, end, text }) => ({ start, end, text }));
-    const provider = request.provider || 'codex', hash = episodeHash(request), db = this.open();
-    try {
-      db.exec('BEGIN IMMEDIATE');
-      const existing = db.prepare('SELECT provider FROM episodes WHERE hash=?').get(hash);
-      if (!existing || providerRank(provider) > providerRank(existing.provider)) db.prepare('INSERT OR REPLACE INTO episodes VALUES(?,?,?,?,?,?)').run(hash, request.target, provider, JSON.stringify(cues), JSON.stringify(stored), new Date().toISOString());
-      db.exec('COMMIT');
+      for (const row of db.prepare('SELECT target, provider, cues, segments, created_at FROM episodes').all()) {
+        const cues = JSON.parse(row.cues), hash = subtitleHash(cues);
+        db.prepare('INSERT OR IGNORE INTO sources VALUES(?,?,?,?)').run(hash, row.cues, cues.length, row.created_at);
+        db.prepare('INSERT OR IGNORE INTO translations VALUES(?,?,?,?,1,?)').run(hash, row.target, row.provider, cues.length, row.created_at);
+        for (const s of JSON.parse(row.segments)) db.prepare('INSERT OR IGNORE INTO lines VALUES(?,?,?,?,?,?)').run(hash, row.target, row.provider, s.indices[0], s.indices.length, s.text);
+      }
+      db.exec('DROP TABLE episodes; COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
-    finally { db.close(); }
   }
+  with(fn) { const db = this.open(); try { return fn(db); } finally { db.close(); } }
+  // Lines of a stored translation, as segments with the request's cue IDs.
+  read(db, hash, request, provider, count) {
+    const rows = db.prepare('SELECT idx, span, text FROM lines WHERE hash=? AND target=? AND provider=? AND idx<? ORDER BY idx').all(hash, request.target, provider, count);
+    const segments = rows.map(r => ({ sourceIds: Array.from({ length: r.span }, (_, k) => request.cues[r.idx + k]?.id), text: r.text }));
+    return validateTranslation({ segments }, request.cues.slice(0, count));
+  }
+  // Returns a complete translation when it is at least as good as the requested provider: the
+  // highest-ranked one, and among equals the first completed. `fallback` also accepts a lower-ranked one.
+  get(request, { fallback = false } = {}) {
+    const hash = subtitleHash(request.cues);
+    return this.with(db => {
+      const rows = db.prepare('SELECT provider FROM translations WHERE hash=? AND target=? AND complete=1 ORDER BY updated_at').all(hash, request.target);
+      const best = rows.sort((a, b) => providerRank(b.provider) - providerRank(a.provider))[0];
+      if (!best || (!fallback && providerRank(best.provider) < providerRank(request.provider))) return null;
+      try { return this.read(db, hash, request, best.provider, request.cues.length); }
+      catch { this.forget(db, hash, request.target, best.provider); return null; }
+    });
+  }
+  // The accepted prefix of an unfinished translation by the requested provider.
+  partial(request) {
+    const hash = subtitleHash(request.cues), provider = request.provider || 'codex';
+    return this.with(db => {
+      const row = db.prepare('SELECT done FROM translations WHERE hash=? AND target=? AND provider=? AND complete=0').get(hash, request.target, provider);
+      if (!row?.done) return [];
+      try { return this.read(db, hash, request, provider, row.done); }
+      catch { this.forget(db, hash, request.target, provider); return []; }
+    });
+  }
+  forget(db, hash, target, provider) {
+    db.prepare('DELETE FROM lines WHERE hash=? AND target=? AND provider=?').run(hash, target, provider);
+    db.prepare('DELETE FROM translations WHERE hash=? AND target=? AND provider=?').run(hash, target, provider);
+  }
+  // Stores the accepted prefix `segments` (validated against the first cues). A complete translation
+  // is kept: the first complete result of a provider is never overwritten.
+  save(request, segments, { complete = false } = {}) {
+    const count = segments.reduce((n, s) => n + s.sourceIds.length, 0);
+    const cues = request.cues.slice(0, count);
+    const validated = validateTranslation({ segments }, cues);
+    if (complete && count !== request.cues.length) throw new Error('Incomplete translation');
+    const index = new Map(request.cues.map((c, i) => [c.id, i]));
+    const hash = subtitleHash(request.cues), provider = request.provider || 'codex', now = new Date().toISOString();
+    this.with(db => {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const existing = db.prepare('SELECT done, complete FROM translations WHERE hash=? AND target=? AND provider=?').get(hash, request.target, provider);
+        if (existing?.complete || (!complete && existing && existing.done >= count)) return db.exec('COMMIT');
+        db.prepare('INSERT OR IGNORE INTO sources VALUES(?,?,?,?)').run(hash, JSON.stringify(request.cues.map(({ start, end, text }) => ({ start, end, text }))), request.cues.length, now);
+        // A growing prefix only appends its new lines; a complete result (whose final text may differ
+        // from the streamed lines) or a prefix that does not continue at `done` replaces them all.
+        const from = existing?.done || 0;
+        const lines = validated.map(s => ({ idx: index.get(s.sourceIds[0]), span: s.sourceIds.length, text: s.text }));
+        const append = !complete && from > 0 && !lines.some(l => l.idx < from && l.idx + l.span > from);
+        if (!append) db.prepare('DELETE FROM lines WHERE hash=? AND target=? AND provider=?').run(hash, request.target, provider);
+        const line = db.prepare('INSERT OR REPLACE INTO lines VALUES(?,?,?,?,?,?)');
+        for (const l of lines) if (!append || l.idx >= from) line.run(hash, request.target, provider, l.idx, l.span, l.text);
+        db.prepare('INSERT OR REPLACE INTO translations VALUES(?,?,?,?,?,?)').run(hash, request.target, provider, count, complete ? 1 : 0, now);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    });
+  }
+  put(request, segments) { this.save(request, segments, { complete: true }); }
 }

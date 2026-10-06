@@ -7,15 +7,15 @@ import { SubtitleDatabase, episodeHash } from './database.mjs';
 export const EPISODE_VERSION = 4;
 const covered = segments => segments.reduce((n, segment) => n + segment.sourceIds.length, 0);
 
-// Tracks whole-episode translations. Accepted translations of an unfinished episode are kept in
-// memory under the episode hash (subtitles + target language) and the translator, independent of the
-// page, tab or request: after a reload, a closed tab, a cancellation or an error (e.g. a usage
-// limit), the next request for the same subtitles resumes after them. Nothing is written to disk
-// until the whole episode has been translated and validated; then it is stored once under its hash.
+// Tracks whole-episode translations. Accepted translations of an unfinished episode are written to
+// the database as they arrive, under the subtitles' hash, the target language and the translator,
+// independent of the page, tab or request: after a reload, a closed tab, a cancellation, an error
+// (e.g. a usage limit) or a restart of the service, the next request for the same subtitles resumes
+// after them. Only a complete, validated translation is marked complete.
 export class EpisodeManager {
   constructor(queue, config, directory = path.join(root, 'data/episodes')) {
     this.database = new SubtitleDatabase(path.join(directory, 'subtitles.sqlite'), config);
-    this.queue = queue; this.config = config; this.directory = directory; this.episodes = new Map(); this.progress = new Map(); this.loading = new Map(); this.cancelledRequests = new Map(); this.pendingRequests = new Set();
+    this.queue = queue; this.config = config; this.directory = directory; this.episodes = new Map(); this.loading = new Map(); this.cancelledRequests = new Map(); this.pendingRequests = new Set();
   }
   async submit(request) {
     this.pendingRequests.add(request);
@@ -51,19 +51,13 @@ export class EpisodeManager {
   }
   // Accepted translations are stored by cue position, so they also apply when cue IDs change.
   progressKey(e) { return `${e.hash}|${e.request.provider || 'codex'}`; }
-  recall(e) {
-    const saved = this.progress.get(this.progressKey(e));
-    if (!saved) return [];
-    try {
-      const segments = saved.map(s => ({ sourceIds: s.indices.map(i => e.request.cues[i]?.id), text: s.text }));
-      return validateTranslation({ segments }, e.request.cues.slice(0, covered(segments)));
-    } catch { this.progress.delete(this.progressKey(e)); return []; }
-  }
-  remember(e, segments) {
-    const index = new Map(e.request.cues.map((c, i) => [c.id, i])), key = this.progressKey(e);
-    this.progress.delete(key);
-    this.progress.set(key, segments.map(s => ({ indices: s.sourceIds.map(id => index.get(id)), text: s.text })));
-    while (this.progress.size > 50) this.progress.delete(this.progress.keys().next().value);
+  recall(e) { return this.database.partial(e.request); }
+  // Writes the accepted prefix at most once a second while streaming; `flush` writes the last one.
+  remember(e, segments) { e.unsaved = segments; if (Date.now() - (e.savedAt || 0) >= 1000) this.flush(e); }
+  flush(e) {
+    if (!e.unsaved) return;
+    const segments = e.unsaved; e.unsaved = null; e.savedAt = Date.now();
+    try { this.database.save(e.request, segments); } catch (error) { console.error(`Could not save progress: ${error.message}`); }
   }
   public(e, after = 0) {
     if (!e) return undefined;
@@ -120,12 +114,12 @@ export class EpisodeManager {
         if (!e.cancelled) {
           if (job.status !== 'done') throw new Error(job.error || 'Episode translation cancelled');
           const complete = validateTranslation({ segments: job.segments }, e.request.cues);
-          this.database.put(e.request, complete);
+          e.unsaved = null; this.database.put(e.request, complete);
           e.segments = this.database.get(e.request) || complete;
-          e.completedCues = e.request.cues.length; this.progress.delete(this.progressKey(e));
+          e.completedCues = e.request.cues.length;
         }
       e.status = e.cancelled ? 'cancelled' : 'done';
     } catch (error) { e.status = 'error'; e.error = error.message; }
-    finally { e.finished = Date.now(); e.running = false; }
+    finally { this.flush(e); e.finished = Date.now(); e.running = false; }
   }
 }
