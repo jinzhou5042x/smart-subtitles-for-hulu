@@ -22,7 +22,7 @@ async function popup(target, status, detail) {
     tabs: { query: async () => [{ id: 1 }], sendMessage: async () => ({ video: true, status: ${JSON.stringify(status)}, detail: ${JSON.stringify(detail)} }), create() {} } };`;
   const html = (await readFile(path.join(root, 'extension/popup.html'), 'utf8'))
     .replace('href="popup.css"', `href="${ext('popup.css')}"`).replace('src="icon.svg"', `src="${ext('icon.svg')}"`)
-    .replace('<script src="popup.js" type="module"></script>', `<script>${stub}</script><script src="${ext('popup.js')}" type="module"></script>`);
+    .replace('<script src="popup.js" type="module"></script>', `<style>*{transition:none!important}</style><script>${stub}</script><script src="${ext('popup.js')}" type="module"></script>`);
   const file = path.join(work, `popup-${target}.html`); await writeFile(file, html);
   shot(file, `work/popup-${target}.png`, 320, 336, 2);
   return pathToFileURL(path.join(out, `work/popup-${target}.png`)).href;
@@ -64,7 +64,7 @@ body{margin:0;width:440px;height:280px;overflow:hidden;background:#f6f5f1;font-f
 .brand img{width:64px;height:64px;display:block;margin-bottom:16px}
 h1{margin:0;font-size:38px;line-height:1;font-weight:800;letter-spacing:-1.2px}
 .for{margin-top:7px;font-size:20px;font-weight:650;color:#13a865}
-.features{flex:1;padding-right:16px;display:flex;flex-direction:column;gap:20px;border-left:1px solid #e3e1da;padding-left:18px;margin:22px 0}
+.features{flex:1;min-width:0;padding-right:16px;display:flex;flex-direction:column;gap:20px;border-left:1px solid #e3e1da;padding-left:18px;margin:22px 0}
 .f{display:flex;align-items:center;gap:11px;font-size:18.5px;font-weight:700;letter-spacing:-.4px;white-space:nowrap}
 .f svg{width:38px;height:38px;flex:none;padding:8px;box-sizing:border-box;border-radius:10px;background:#13a8651a;stroke:#13a865;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 </style></head><body>
@@ -73,7 +73,12 @@ h1{margin:0;font-size:38px;line-height:1;font-weight:800;letter-spacing:-1.2px}
   <div class="f"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/></svg>55 languages</div>
   <div class="f"><svg viewBox="0 0 24 24"><path d="M9.5 12.5a2.5 2.5 0 1 1 0-.01V12c0 2.6-1.4 4.6-3.6 5.4M18.5 12.5a2.5 2.5 0 1 1 0-.01V12c0 2.6-1.4 4.6-3.6 5.4" stroke-width="2.2"/><circle cx="7" cy="10.8" r="2.4" fill="#13a865" stroke="none"/><circle cx="16" cy="10.8" r="2.4" fill="#13a865" stroke="none"/></svg>Natural translation</div>
   <div class="f"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Perfect timing</div>
-</div></body></html>
+</div>
+<script>
+// Fonts wider than Segoe UI (e.g. Noto on Linux) would push the text to the edge; shrink it to fit.
+const rows = [...document.querySelectorAll('.f')], overflows = () => rows.some(f => f.scrollWidth > f.clientWidth);
+for (let size = 18.5; overflows() && size > 14; size -= 0.5) for (const f of rows) f.style.fontSize = size + 'px';
+</script></body></html>
 `);
 shot(tile, 'promo-440x280.png', 440, 280);
 console.log(`Store images written to ${out}`);
