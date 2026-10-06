@@ -27,10 +27,10 @@ test('dialogue with instruction-like content stays JSON data', () => {
 
 test('Codex output must return every subtitle number exactly once and in order', () => {
   const cues = [{ id: 'a', start: 4.501, end: 6.626, text: 'One' }, { id: 'b', start: 6.7, end: 8, text: 'two.' }, { id: 'c', start: 9, end: 10, text: 'Three.' }];
-  assert.deepEqual(alignByIndex([{ i: 1, t: '一' }, { i: 2, t: '二' }, { i: 3, t: '三' }], cues).map(s => [s.sourceIds[0], s.start, s.end]), [['a', 4.501, 6.626], ['b', 6.7, 8], ['c', 9, 10]]);
-  assert.throws(() => alignByIndex([{ i: 1, t: '一' }, { i: 3, t: '三' }], cues), /wrong number of subtitles \(2\/3\)/);
-  assert.throws(() => alignByIndex([{ i: 1, t: '一' }, { i: 3, t: '三' }, { i: 2, t: '二' }], cues), /subtitle 2 does not match/);
-  assert.throws(() => alignByIndex([{ i: 1, t: '一' }, { i: 2, t: '二' }, { i: 3, t: '' }], cues), /translated text/);
+  assert.deepEqual(alignByIndex([{ i: 1, s: 'One', t: '一' }, { i: 2, s: 'two.', t: '二' }, { i: 3, s: 'Three.', t: '三' }], cues).map(s => [s.sourceIds[0], s.start, s.end]), [['a', 4.501, 6.626], ['b', 6.7, 8], ['c', 9, 10]]);
+  assert.throws(() => alignByIndex([{ i: 1, s: 'One', t: '一' }, { i: 3, s: 'Three.', t: '三' }], cues), /wrong number of subtitles \(2\/3\)/);
+  assert.throws(() => alignByIndex([{ i: 1, s: 'One', t: '一' }, { i: 3, s: 'Three.', t: '三' }, { i: 2, s: 'two.', t: '二' }], cues), /subtitle 2 does not match/);
+  assert.throws(() => alignByIndex([{ i: 1, s: 'One', t: '一' }, { i: 2, s: 'two.', t: '二' }, { i: 3, s: 'Three.', t: '' }], cues), /translated text/);
 });
 
 test('targets are language codes from the shared list; prompts name the language in English', () => {
@@ -39,4 +39,18 @@ test('targets are language codes from the shared list; prompts name the language
   assert.throws(() => validateRequest({ ...request, target: '简体中文' }), /Unsupported target language/);
   const prompt = JSON.parse(buildPrompt({ ...request, target: 'pt' }, {}));
   assert.equal(prompt.sourceLanguage, 'English'); assert.equal(prompt.targetLanguage, 'Portuguese');
+});
+
+test('correct numbering and count cannot hide merged or shifted source cues', () => {
+  const source = [
+    { id: 'a', text: 'I always thought there was something different', start: 1, end: 2 },
+    { id: 'b', text: 'about Ollie,', start: 2.1, end: 3 },
+    { id: 'c', text: 'but I thought it was his accent.', start: 3.1, end: 4 }
+  ];
+  assert.throws(() => alignByIndex([
+    { i: 1, s: source[0].text + ' ' + source[1].text, t: 'merged' },
+    { i: 2, s: source[2].text, t: 'shifted' },
+    { i: 3, s: source[2].text, t: 'padding' }
+  ], source), /source text/);
+  assert.throws(() => alignByIndex(source.map((c, i) => ({ i: i + 1, t: 'no source anchor' })), source), /source text/);
 });

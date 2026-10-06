@@ -1,4 +1,6 @@
 import './languages.js';
+import './sites.js';
+import { readSubtitleResource } from './subtitle-resource.js';
 const DEFAULTS = { enabled: true, target: globalThis.SubtitleLanguages.defaultCode, sourceLanguage: 'en', provider: 'codex', fontSize: 60, subtitleOffset: 0 };
 // Storage holds only what the user changed, so a new default applies until the user picks a value.
 // Version 2 drops the font size that earlier versions stored along with every other default.
@@ -36,7 +38,7 @@ async function request(route, method = 'GET', body) {
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
-function isContent(sender) { try { const u = new URL(sender.url); return sender.tab && (u.hostname === 'hulu.com' || u.hostname.endsWith('.hulu.com') || (u.hostname === '127.0.0.1' && u.pathname === '/demo')); } catch { return false; } }
+function isContent(sender) { return !!sender.tab && !!globalThis.SubtitleSites.identify(sender.url); }
 function isPopup(sender) { return !sender.tab && sender.url === chrome.runtime.getURL('popup.html'); }
 const clients = new Map();
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -49,7 +51,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         const changes = { ...message.settings };
         if ('fontSize' in changes) changes.fontSize = Math.max(18, Math.min(100, Number(changes.fontSize) || DEFAULTS.fontSize));
         const next = await store(changes);
-        const tabs = await chrome.tabs.query({ url: ['https://*.hulu.com/*', 'https://hulu.com/*', 'http://127.0.0.1/*'] });
+        const tabs = await chrome.tabs.query({ url: globalThis.SubtitleSites.matches });
         await Promise.allSettled(tabs.map(t => chrome.tabs.sendMessage(t.id, { type: 'settingsChanged', settings: next })));
         return next;
       }
@@ -62,6 +64,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         await chrome.storage.local.set({ token: message.token, port: message.port }); return request('/status');
       }
       case 'status': return request('/status');
+      case 'configureGoogle': {
+        if (!isPopup(sender)) throw new Error('Popup only');
+        return request('/settings/google', 'POST', { file: message.file, key: message.key });
+      }
+      case 'subtitleResource': {
+        if (!isContent(sender) || globalThis.SubtitleSites.identify(sender.url) !== 'disney') throw new Error('Disney+ player only');
+        return readSubtitleResource(message.url);
+      }
       case 'prepareEpisode': {
         if (!isContent(sender)) throw new Error('Player only');
         const config = await settings(); if (!config.enabled) throw new Error('Subtitles are turned off');

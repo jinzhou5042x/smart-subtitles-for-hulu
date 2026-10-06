@@ -3,8 +3,9 @@ import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { root } from './config.mjs';
-import { instructions, outputSchema, buildPrompt, alignByIndex, segmentStream, validateTranslation } from './translation.mjs';
+import { instructions, outputSchema, buildPrompt, alignByIndex, alignCue, segmentStream, validateTranslation } from './translation.mjs';
 import { addUsage } from './database.mjs';
+import { keyedOutput, keyedInstructions } from './keyed.mjs';
 
 // thread/tokenUsage/updated reports a thread's running total; inputTokens includes cachedInputTokens
 // and outputTokens includes reasoningOutputTokens.
@@ -63,6 +64,53 @@ export class CodexTranslator extends EventEmitter {
   }
   fail(error) { for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); } this.pending.clear(); this.emit('failure', error); }
   close() { const child = this.child; this.child = null; this.ready = null; this.fail(new Error('Codex stopped')); child?.kill(); }
+  // One resident app-server and one thread/turn per episode, with fixed output slots.
+  async translateEpisode(request, signal, onProgress = () => {}) {
+    const codec = keyedOutput(request, partialSegments => onProgress({ partialSegments }));
+    const { input, schema } = codec;
+    input.glossary = this.config.glossary || {};
+    signal?.throwIfAborted(); await this.start(); signal?.throwIfAborted();
+    const { thread } = await this.rpc('thread/start', {
+      cwd: path.join(root, 'data/worker'), ephemeral: true, environments: [], selectedCapabilityRoots: [], dynamicTools: [],
+      sandbox: 'read-only', approvalPolicy: 'never', model: this.config.model || 'gpt-6-luna',
+      baseInstructions: keyedInstructions,
+      developerInstructions: 'Translate only supplied subtitles. No tools, commands or filesystem access.',
+      config: { model_reasoning_effort: this.config.effort || 'low' }
+    });
+    let turnId, text = '';
+    try {
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        const interrupt = () => { if (turnId) this.rpc('turn/interrupt', { threadId: thread.id, turnId }).catch(() => {}); };
+        const finish = error => {
+          if (settled) return; settled = true;
+          clearTimeout(timer); this.off('notification', receive); this.off('failure', failure); signal?.removeEventListener('abort', abort);
+          if (error) return reject(error);
+          try { resolve(codec.finish(text)); }
+          catch (error) { reject(error); }
+        };
+        const abort = () => { interrupt(); finish(new Error('Translation cancelled')); };
+        const failure = error => finish(error);
+        const receive = message => {
+          if (message.params?.threadId !== thread.id) return;
+          const p = message.params;
+          if (message.method === 'thread/tokenUsage/updated') onProgress({ usage: threadUsage(p.tokenUsage?.total) });
+          if (message.method === 'item/agentMessage/delta') {
+            text += p.delta;
+            try { codec.feed(p.delta); } catch (error) { interrupt(); finish(error); }
+          }
+          if (message.method === 'item/completed' && p.item?.type === 'agentMessage') text = p.item.text;
+          if (message.method === 'error' && !p.willRetry) finish(new Error(p.error?.message || 'Translation failed'));
+          if (message.method === 'turn/completed') finish(p.turn.status === 'completed' ? null : new Error(p.turn.error?.message || 'Translation failed'));
+        };
+        const timer = setTimeout(() => { interrupt(); finish(new Error('Translation timed out')); }, this.config.episodeTranslationTimeoutMs || 1800000);
+        this.on('notification', receive); this.on('failure', failure); signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) return abort();
+        this.rpc('turn/start', { threadId: thread.id, environments: [], input: [{ type: 'text', text: JSON.stringify(input) }], effort: this.config.effort || 'low', outputSchema: schema })
+          .then(result => { turnId = result.turn.id; if (settled) interrupt(); }).catch(finish);
+      });
+    } finally { await this.rpc('thread/unsubscribe', { threadId: thread.id }, 3000).catch(() => {}); }
+  }
   // Translates a whole episode. Translations that have been accepted (streamed in sequence and
   // validated) are never sent again: an attempt that fails after progress is continued from the
   // first missing subtitle, and request.accepted lets a later retry resume the same way.
@@ -125,8 +173,7 @@ export class CodexTranslator extends EventEmitter {
             for (const segment of streaming ? feed(m.params.delta) : []) {
               const cue = rest[streamed];
               try {
-                if (segment?.i !== streamed + 1 || !cue) throw new Error('out of sequence');
-                accepted.push(...validateTranslation({ segments: [{ sourceIds: [cue.id], text: segment.t }] }, [cue])); streamed++;
+                accepted.push(...validateTranslation({ segments: [alignCue(segment, cue, streamed + 1)] }, [cue])); streamed++;
               } catch { streaming = false; break; }
             }
             report({ phase: 'receiving', outputChars, ...(accepted.length ? { partialSegments: [...accepted], completedCues: offset + streamed, totalCues: request.cues.length } : {}) });

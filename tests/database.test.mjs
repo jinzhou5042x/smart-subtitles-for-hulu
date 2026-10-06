@@ -7,6 +7,24 @@ import { root } from '../service/config.mjs';
 import { SubtitleDatabase, subtitleHash, episodeHash } from '../service/database.mjs';
 // data/ is gitignored, so a fresh clone does not have it yet.
 await mkdir(path.join(root, 'data'), { recursive: true });
+test('legacy cache is archived and only explicitly bound checkpoints survive restart', async () => {
+  const dir = await mkdtemp(path.join(root, 'data/test-db-'));
+  try {
+    const file = path.join(dir, 'subtitles.sqlite');
+    const request = { target: 'zh-CN', provider: 'codex', cues: [0, 1].map(i => ({ id: String(i), start: i, end: i + 1, text: 'Source ' + i })) };
+    const old = request.cues.map(c => ({ sourceIds: [c.id], text: 'old ' + c.id }));
+    new SubtitleDatabase(file, {}).put(request, old);
+    const db = new SubtitleDatabase(file, { requireBinding: true });
+    assert.equal(db.get(request), null); assert.deepEqual(db.partial(request), []);
+    assert.equal(db.with(sql => JSON.parse(sql.prepare('SELECT lines FROM legacy_translations').get().lines).length), 2);
+    db.save(request, [{ ...old[0], text: 'corrected' }]);
+    const restarted = new SubtitleDatabase(file, { requireBinding: true });
+    assert.equal(restarted.partial(request)[0].text, 'corrected');
+    assert.equal(restarted.with(sql => JSON.parse(sql.prepare('SELECT lines FROM legacy_translations').get().lines)[1].text), 'old 1');
+    restarted.put(request, [{ ...old[0], text: 'corrected' }, old[1]]);
+    assert.equal(restarted.get(request)[0].text, 'corrected');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 test('complete translations are per target language; Codex upgrades batch results but nothing else overwrites', async () => {
   const dir = await mkdtemp(path.join(root, 'data/test-db-'));
   try {

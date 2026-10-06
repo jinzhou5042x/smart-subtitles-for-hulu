@@ -1,7 +1,6 @@
 (() => {
   if (location.hostname === '127.0.0.1' && location.pathname !== '/demo') return;
   if (globalThis.__huluContextSubtitles) return;
-  globalThis.__huluContextSubtitles = true;
   const C = globalThis.SubtitleCore, site = globalThis.SubtitleSite, version = chrome.runtime.getManifest().version;
   let settings, video, epoch = crypto.randomUUID(), page = site.episodeKey();
   let candidates = [], selected = null, imported = null, cues = [], translations = new Map();
@@ -18,7 +17,7 @@
     const checked = [capture.metadata && `${capture.metadata} playback info`, capture.manifests && `${capture.manifests} stream manifests`].filter(Boolean).join(' · ');
     if (complete) return { status: episode?.cached ? 'Loaded from the local database' : 'Episode subtitles ready', detail: site.adBreak() ? 'Ad break · subtitles return with the episode' : 'Synced to the original timing' };
     if (error) return { status: 'Translation paused', detail: error, retry: true };
-    if (!video) return { status: 'Waiting for a Hulu video', detail: '' };
+    if (!video) return { status: `Waiting for a ${site.name} video`, detail: '' };
     if (selected) {
       if (!episode) return { status: 'Subtitles parsed, submitting for translation', detail: `${cues.length} subtitles · timing checked` };
       const p = episode.progress;
@@ -48,6 +47,8 @@
     if (checked) return { status: waiting ? 'No subtitle file found for this episode' : 'Looking for the episode subtitles', detail: `Checked ${checked} · ${seconds} s${waiting ? ' · turn on captions in the player, or reload the video' : ''}`, retry: waiting };
     return { status: waiting ? 'No playback information received' : 'Waiting for the episode subtitles', detail: waiting ? 'Reload the video to try again' : '', retry: waiting };
   }
+  // A previous extension context may have left an inert overlay in this document.
+  document.getElementById('hulu-context-subtitles')?.remove();
   const host = document.createElement('div'); host.id = 'hulu-context-subtitles';
   const shadow = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
@@ -125,7 +126,9 @@
     clearTranslation(); selected = null; imported = null; cues = []; candidates = []; captureError = ''; timingInfo = ''; source = 'Waiting for the episode subtitles'; status = 'Fetching the episode subtitles';
   }
   function entireFile(file) {
-    const duration = videoDuration();
+    // Disney's Hive player reports Infinity for VOD. A finite, fully downloaded HLS playlist
+    // supplies its own duration; do not use the current buffer/seekable end as episode length.
+    const duration = videoDuration() || (site.name === 'Disney+' ? file.duration : 0);
     if (!video || !duration) return false;
     return file.cues.length > 0 && file.cues.at(-1).end >= duration * 0.65 && file.cues.at(-1).end <= duration + 30;
   }
@@ -191,6 +194,7 @@
     const progress = progressInfo(); status = progress.status; host.dataset.detail = progress.detail;
     host.dataset.status = status; host.dataset.error = error; host.dataset.captured = String(candidates.length); host.dataset.captureError = captureError; host.dataset.timingInfo = timingInfo;
     host.dataset.complete = String(complete); host.dataset.episode = episode?.id || '';
+    host.dataset.timeOrigin = String(selected?.timeOrigin || 0);
     host.dataset.files = JSON.stringify(candidates.map(f => ({ name: f.name, language: f.language, count: f.cues.length, end: f.cues.at(-1)?.end })));
     if (!settings?.enabled || !video || site.adBreak()) { host.style.display = 'none'; return; }
     const parent = site.overlayParent(); if (parent && host.parentNode !== parent) parent.append(host);
@@ -200,18 +204,24 @@
     pictureHeight = Math.max(1, rect.height);
     wrap.style.paddingBottom = `${Math.max(12, rect.height * 0.035) + offset() * rect.height}px`;
     Object.assign(host.style, { display: 'block', left: rect.left + 'px', top: rect.top + 'px', width: rect.width + 'px', height: rect.height + 'px' });
-    const active = C.active(cues, video.currentTime).filter(c => translations.has(c.id));
+    const subtitleTime = site.subtitleTime(video, selected?.timeOrigin || 0);
+    host.dataset.clockPolicy = site.clockPolicy;
+    host.dataset.mediaTime = String(video.currentTime);
+    host.dataset.subtitleTime = Number.isFinite(subtitleTime) ? String(subtitleTime) : '';
+    host.dataset.clockOffset = Number.isFinite(subtitleTime) ? String(video.currentTime - subtitleTime) : '';
+    const active = (Number.isFinite(subtitleTime) ? C.active(cues, subtitleTime) : []).filter(c => translations.has(c.id));
     fitLine(translatedLine, [...new Set(active.map(c => translations.get(c.id)).filter(Boolean))].map(s => s.text).join(' '), fontSize, rect.width);
     fitLine(originalLine, active.map(c => c.text).join(' '), Math.round(fontSize * 0.7), rect.width);
-    badge.textContent = '';
+    badge.textContent = !Number.isFinite(subtitleTime) && cues.length ? 'Move your pointer over the video or pause once to sync subtitles' : '';
   }
   function tick() {
-    if (!settings) return;
+    if (!settings) { void loadSettings(); return; }
     if (Date.now() - lastScan > 750) {
       lastScan = Date.now();
       if (page !== site.episodeKey()) { page = site.episodeKey(); newPage(); }
       const nextVideo = site.contentVideo();
-      if (video && !nextVideo) { newPage(); window.postMessage({ type: 'hulu-context-stop' }, location.origin); }
+      // Player elements disappear briefly during startup and ad transitions.
+      // Keep this episode's captures and downloads; only a route change resets them.
       if (!video && nextVideo) window.postMessage({ type: 'hulu-context-resume' }, location.origin);
       video = nextVideo; if (video && settings.enabled) acquire();
       if (video && !contentStarted && !site.adBreak() && !video.paused && video.currentTime > 0.5) contentStarted = Date.now();
@@ -228,7 +238,7 @@
       // tone: done, working, error or waiting; the popup draws the progress, time and tokens from these fields.
       const tone = complete ? 'done' : error ? 'error' : working ? 'working' : info.retry ? 'error' : 'waiting';
       respond({ version, video: !!video, source, total: cues.length, translated: translations.size, complete, busy, ...info, tone, cached: !!episode?.cached, elapsedMs: episode && !episode.cached ? episode.elapsedMs : null, usage: episode?.usage || null, error, captureError, episodeId: episode?.id, files: candidates.map(f => ({ name: f.name, language: f.language, cues: f.cues.length })) });
-    } else if (m.type === 'retry') { error = ''; retryAt = 0; window.postMessage({ type: 'hulu-context-replay' }, location.origin); respond({ ok: true }); }
+    } else if (m.type === 'retry') { error = ''; captureError = ''; retryAt = 0; window.postMessage({ type: 'hulu-context-replay', retry: true }, location.origin); respond({ ok: true }); }
     else if (m.type === 'importSubtitles') {
       try { const list = C.parseSubtitles(m.text); imported = { cues: list, fingerprint: C.hash(m.text) }; adopt(imported, 'Imported episode subtitles'); respond({ ok: true, count: list.length }); }
       catch (e) { respond({ ok: false, error: e.message }); }
@@ -236,6 +246,15 @@
   });
   window.addEventListener('message', e => {
     if (e.source !== window || e.origin !== location.origin) return;
+    if (e.data?.type === 'hulu-context-resource-request' && e.data.page === location.pathname && typeof e.data.id === 'string' && e.data.id.length < 80 && globalThis.SubtitleSites.identify(location.href) === 'disney' && globalThis.SubtitleSites.subtitleResource(e.data.url)) {
+      const { id, page: requestedPage, url } = e.data;
+      send({ type: 'subtitleResource', url }).then(data => {
+        if (requestedPage === location.pathname) window.postMessage({ type: 'hulu-context-resource-result', id, page: requestedPage, ...data }, location.origin);
+      }).catch(() => {
+        if (requestedPage === location.pathname) window.postMessage({ type: 'hulu-context-resource-result', id, page: requestedPage, error: 'Could not read the Disney+ subtitle file' }, location.origin);
+      });
+      return;
+    }
     if (e.data?.type === 'hulu-context-progress' && e.data.page === location.pathname) {
       if (page !== site.episodeKey()) { page = site.episodeKey(); newPage(); }
       for (const key of ['metadata', 'manifests', 'found', 'pending', 'received']) capture[key] = Math.max(0, Math.min(40000, Number(e.data[key]) || 0));
@@ -258,12 +277,26 @@
         parsed = globalThis.SubtitleTTML.parseTTML(xml);
       } else parsed = C.parseSubtitles(e.data.text);
       if (parsed.length > 20000) throw new Error('Too many subtitle entries');
-      candidates.push({ name: String(e.data.name).slice(0, 150), language, detected: C.sourceLanguage(parsed), fingerprint, cues: parsed }); if (candidates.length > 10) candidates.shift();
+      const duration = Number.isFinite(e.data.duration) && e.data.duration > 0 && e.data.duration < 86400 ? e.data.duration : 0;
+      const timeOrigin = Number.isFinite(e.data.timeOrigin) && Math.abs(e.data.timeOrigin) < 100000 ? e.data.timeOrigin : 0;
+      candidates.push({ name: String(e.data.name).slice(0, 150), language, detected: C.sourceLanguage(parsed), fingerprint, cues: parsed, duration, timeOrigin }); if (candidates.length > 10) candidates.shift();
       captureError = '';
     } catch (e) { captureError = e.message; }
   });
   document.addEventListener('fullscreenchange', render);
   window.addEventListener('pagehide', cancel);
-  send({ type: 'settings' }).then(s => { settings = s; tick(); window.postMessage({ type: 'hulu-context-replay' }, location.origin); }).catch(e => { error = e.message; });
+  let loadingSettings = false, nextSettingsAttempt = 0;
+  async function loadSettings() {
+    if (loadingSettings || Date.now() < nextSettingsAttempt) return;
+    loadingSettings = true;
+    try {
+      settings = await send({ type: 'settings' }); error = ''; tick();
+      window.postMessage({ type: 'hulu-context-replay' }, location.origin);
+    } catch (e) { error = e.message; nextSettingsAttempt = Date.now() + 2000; }
+    finally { loadingSettings = false; }
+  }
+  void loadSettings();
   setInterval(tick, 150);
+  // Mark ready only after initialization succeeds, so a failed attach can retry.
+  globalThis.__huluContextSubtitles = true;
 })();

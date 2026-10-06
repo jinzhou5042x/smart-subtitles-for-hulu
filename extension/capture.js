@@ -1,6 +1,14 @@
 (() => {
   if (location.hostname === '127.0.0.1' && location.pathname !== '/demo') return;
+  // MAIN-world hooks survive an extension reload. Reuse their replay buffer.
+  if (globalThis.__huluSubtitleCaptureInstalled) return;
+  globalThis.__huluSubtitleCaptureInstalled = true;
   const buffer = [], requested = new Set();
+  const discovered = new Map(), manifestCopies = new Map(), failures = new Map();
+  function remember(map, key, value) {
+    map.set(key, value);
+    if (map.size > 64) map.delete(map.keys().next().value);
+  }
   const downloads = new Set(); let stopped = false;
   function stop() { stopped = true; for (const controller of downloads) controller.abort(); downloads.clear(); }
   window.addEventListener('pagehide', stop);
@@ -16,7 +24,7 @@
   }
   const subtitleURL = url => /\.(webvtt|vtt|ttml|dfxp|srt|smi)(?:[?#]|$)/i.test(url) || /(?:caption|subtitle)[^?#]*\.xml/i.test(url);
   const subtitleType = mime => /text\/vtt|application\/(?:ttml|dfxp)\+xml/i.test(mime);
-  const metadataURL = url => /(?:playback|playlist|manifest|asset)/i.test(url) && !/\.(mp4|m4s|ts|mpd|m3u8)(?:[?#]|$)/i.test(url);
+  const metadataURL = url => /(?:playback|playlist|manifest|asset|\/media\/|\/scenarios\/)/i.test(url) && !/\.(mp4|m4s|ts|mpd|m3u8)(?:[?#]|$)/i.test(url);
   // Stream manifests: HLS (subtitles as EXT-X-MEDIA TYPE=SUBTITLES playlists of WebVTT segments) and DASH.
   const hlsURL = url => /\.m3u8(?:[?#]|$)/i.test(url), dashURL = url => /\.mpd(?:[?#]|$)/i.test(url);
   const hlsType = mime => /mpegurl/i.test(mime), dashType = mime => /dash\+xml/i.test(mime);
@@ -24,10 +32,10 @@
   const subtitleKey = key => /caption|subtitle|transcript|timedtext|texttrack/i.test(key);
   const otherFile = url => /\.(woff2?|ttf|otf|png|jpe?g|gif|webp|svg|css|js|json|mp4|m4s|m4a|ts|aac|mp3)(?:[?#]|$)/i.test(url);
   function emit(data) { if (!stopped && data.page === location.pathname) window.postMessage(data, location.origin); }
-  function publish(url, text, page, language = '') {
+  function publish(url, text, page, language = '', duration = 0, timeOrigin = 0) {
     if (typeof text !== 'string' || text.length > 5_000_000 || page !== location.pathname) return;
     let name; try { name = new URL(url, location.href).pathname.split('/').at(-1); } catch { name = 'captions'; }
-    const data = { type: 'hulu-context-captured', page, name, text, language };
+    const data = { type: 'hulu-context-captured', page, name, text, language, duration, timeOrigin };
     buffer.push(data); if (buffer.length > 12) buffer.shift(); emit(data);
     report(page, { received: 1 });
   }
@@ -37,13 +45,33 @@
     if (!localDemo && (parsed.protocol !== 'https:' || /^(localhost$|127\.|0\.|10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.|\[|169\.254\.)/i.test(parsed.hostname))) return null;
     return parsed;
   }
-  const get = (url, signal) => Reflect.apply(fetchOriginal, window, [url, { credentials: 'same-origin', signal }]);
+  const resourceRequests = new Map();
+  function extensionResource(url, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted || stopped || resourceRequests.size >= 12) return reject(new Error('Subtitle request cancelled or busy'));
+      const id = crypto.randomUUID(), page = location.pathname;
+      const finish = (error, data) => { clearTimeout(timer); resourceRequests.delete(id); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(new Response(data.text, { headers: { 'content-type': data.mime || 'text/plain' } })); };
+      const abort = () => finish(new Error('Subtitle request cancelled'));
+      const timer = setTimeout(() => finish(new Error('Subtitle request timed out')), 18000);
+      resourceRequests.set(id, { page, finish }); signal?.addEventListener('abort', abort, { once: true });
+      window.postMessage({ type: 'hulu-context-resource-request', id, page, url }, location.origin);
+    });
+  }
+  async function get(url, signal) {
+    const parsed = remote(url); if (!parsed) throw new Error('Unsupported subtitle URL');
+    try { return await Reflect.apply(fetchOriginal, window, [parsed.href, { credentials: 'same-origin', signal }]); }
+    catch (error) {
+      if (signal?.aborted || globalThis.SubtitleSites.identify(location.href) !== 'disney' || !globalThis.SubtitleSites.subtitleResource(parsed.href)) throw error;
+      return extensionResource(parsed.href, signal);
+    }
+  }
   // `listed`: the URL was named as a subtitle file by playback metadata or a manifest.
   async function fetchSubtitle(url, page, language, listed = false) {
-    if (stopped) return;
     const parsed = remote(url); if (!parsed) return;
     if (!listed && !subtitleURL(parsed.href)) return;
-    const key = page + '|' + parsed.href; if (requested.has(key)) return; requested.add(key);
+    const key = page + '|' + parsed.href;
+    remember(discovered, key, { url: parsed.href, page, language, listed });
+    if (stopped || requested.has(key) || Date.now() < (failures.get(key)?.after || 0)) return; requested.add(key);
     report(page, { found: 1, pending: 1 });
     const controller = new AbortController(); downloads.add(controller);
     try {
@@ -53,7 +81,11 @@
       // A listed URL may also be an HLS playlist of subtitle segments.
       if (/^#EXTM3U/.test(text)) await segments(parsed.href, text, page, language, controller.signal);
       else publish(parsed.href, text, page, language);
-    } catch { requested.delete(key); emit({ type: 'hulu-context-capture-error', page, error: 'The complete subtitle file cannot be read right now' }); }
+      failures.delete(key);
+    } catch {
+      const count = (failures.get(key)?.count || 0) + 1;
+      remember(failures, key, { count, after: Date.now() + Math.min(60000, 2000 * 2 ** Math.min(count - 1, 5)) });
+      requested.delete(key); emit({ type: 'hulu-context-capture-error', page, error: 'The complete subtitle file cannot be read right now' }); }
     finally { downloads.delete(controller); report(page, { pending: -1 }); }
   }
   // An HLS subtitle playlist lists WebVTT segments; they are downloaded in order and joined into one
@@ -68,14 +100,19 @@
     return Number(/MPEGTS:(\d+)/.exec(map)?.[1] || 0) / 90000 - clock(/LOCAL:([\d:.]+)/.exec(map)?.[1] || '0');
   }
   async function segments(url, list, page, language, signal) {
+    // A live/sliding window is not a complete episode; never cache it as one.
+    if (!/#EXT-X-ENDLIST/.test(list)) throw new Error('Live subtitle playlists are not supported');
+    if (/#EXT-X-KEY:(?![^\n]*METHOD=NONE)/.test(list)) throw new Error('Encrypted subtitles are not supported');
     const urls = list.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => new URL(l, url).href);
-    if (!urls.length || urls.length > 5000) throw new Error('Unexpected subtitle playlist');
-    const texts = new Array(urls.length); let next = 0;
+    if (!urls.length || urls.length > 5000 || urls.some(u => !subtitleURL(u))) throw new Error('Unexpected subtitle playlist');
+    const texts = new Array(urls.length); let next = 0, bytes = 0;
     await Promise.all(Array.from({ length: Math.min(6, urls.length) }, async () => {
       while (next < urls.length) {
         const i = next++, response = await get(urls[i], signal);
         if (!response.ok) throw new Error('Could not read a subtitle segment');
         texts[i] = await response.text();
+        bytes += texts[i].length;
+        if (bytes > 5_000_000) throw new Error('Subtitle playlist is too large');
       }
     }));
     const seen = new Set(), cues = [], first = timestampMap(texts[0]);
@@ -90,7 +127,8 @@
       }
     }
     if (!cues.length) throw new Error('The subtitle segments are not WebVTT');
-    publish(url, `WEBVTT\n\n${cues.join('\n\n')}\n`, page, language);
+    const duration = [...list.matchAll(/^#EXTINF:([\d.]+)/gm)].reduce((sum, match) => sum + Number(match[1]), 0);
+    publish(url, `WEBVTT\n\n${cues.join('\n\n')}\n`, page, language, duration, first);
   }
   const attributes = line => Object.fromEntries([...line.matchAll(/([A-Z0-9-]+)=("[^"]*"|[^,]*)/g)].map(m => [m[1], m[2].replace(/^"|"$/g, '')]));
   const manifestsSeen = new Set();
@@ -101,7 +139,7 @@
       if (!line.startsWith('#EXT-X-MEDIA:')) continue;
       const a = attributes(line.slice(13));
       // Forced tracks only cover foreign-language parts; they are not the episode's subtitles.
-      if (a.TYPE === 'SUBTITLES' && a.URI && a.FORCED !== 'YES') void fetchSubtitle(new URL(a.URI, url).href, page, a.LANGUAGE || '', true);
+      if (a.TYPE === 'SUBTITLES' && a.URI && a.FORCED !== 'YES' && (!a.LANGUAGE || /^(?:en|eng)(?:[-_]|$)/i.test(a.LANGUAGE))) void fetchSubtitle(new URL(a.URI, url).href, page, a.LANGUAGE || '', true);
     }
   }
   function dash(text, url, page) {
@@ -124,6 +162,8 @@
   }
   function inspect(url, text, page, mime) {
     if (typeof text !== 'string' || text.length > 5_000_000) return;
+    // Keep small master manifests so Retry can rediscover tracks without a page reload.
+    if (text.length <= 250000) remember(manifestCopies, page + '|' + url, { url, text, page, mime });
     try {
       if (hlsURL(url) || hlsType(mime) || /^#EXTM3U/.test(text)) hls(text, url, page);
       else if (dashURL(url) || dashType(mime)) dash(text, url, page);
@@ -183,14 +223,30 @@
   };
   // A <track src> can be loaded directly without touching its enabled/disabled mode.
   function scanTracks() { for (const t of document.querySelectorAll('video track[src]')) void fetchSubtitle(t.src, location.pathname, t.srclang || ''); }
+  function retryDiscovered() {
+    for (const item of [...discovered.values()]) {
+      if (item.page === location.pathname) void fetchSubtitle(item.url, item.page, item.language, item.listed);
+    }
+  }
   let lastReplay = 0;
   window.addEventListener('message', e => {
     if (e.source === window && e.origin === location.origin) {
+      if (e.data?.type === 'hulu-context-resource-result') {
+        const pending = resourceRequests.get(e.data.id);
+        if (pending && pending.page === e.data.page && e.data.page === location.pathname && (e.data.error || (typeof e.data.text === 'string' && e.data.text.length <= 5_000_000))) pending.finish(e.data.error ? new Error(e.data.error) : null, e.data);
+        return;
+      }
       if (e.data?.type === 'hulu-context-stop') { stop(); return; }
-      if (e.data?.type === 'hulu-context-resume') { stopped = false; scanTracks(); return; }
+      if (e.data?.type === 'hulu-context-resume') { stopped = false; for (const data of buffer) emit(data); retryDiscovered(); scanTracks(); return; }
     }
     if (e.source !== window || e.origin !== location.origin || e.data?.type !== 'hulu-context-replay' || Date.now() - lastReplay < 1000) return;
-    lastReplay = Date.now(); for (const data of buffer) emit(data); scanTracks(); report(location.pathname);
+    lastReplay = Date.now();
+    if (e.data.retry) {
+      stopped = false; failures.clear();
+      for (const item of [...manifestCopies.values()]) if (item.page === location.pathname) inspect(item.url, item.text, item.page, item.mime);
+      retryDiscovered();
+    }
+    for (const data of buffer) emit(data); scanTracks(); report(location.pathname);
   });
-  setInterval(scanTracks, 2000);
+  setInterval(() => { if (!stopped) { scanTracks(); retryDiscovered(); } }, 2000);
 })();

@@ -1,5 +1,19 @@
 # Validation record
 
+## Exact timestamp/source output and durable publication (2026-10-06)
+
+Output now uses original start–end timestamps as keys and emits `source` before `translation`. Runtime checks require exact timestamp strings and verbatim source text, including line breaks. Shared timestamps preserve separate cues and match their sources without merging. Source enums containing newlines were rejected by the live API, so source equality is enforced by the streaming parser instead. Database commits are read back before any progress is published; the final result is also loaded from SQLite rather than falling back to model output.
+
+96 automated tests passed. A live 341-cue test used one thread and one turn, passed all timestamp/source checks and saved seven windows: 151.0 seconds, 26,819 input tokens, 12,128 output tokens (38,947 total). The run was staged separately, then its output was revalidated and installed after backing up the existing database. These are structural checks, not a proof of semantic accuracy. Inspection still found some cross-fragment phrasing, so the prompt was strengthened to prioritize fragment fidelity, followed by a focused six-cue live test of the previously problematic boundaries.
+
+## Single input/output checkpoints (2026-10-06)
+
+The production Codex path uses one thread and one turn per episode, on a resident app-server. Fixed output keys map to original IDs and timestamps. Three-minute video checkpoints consume the same stream without additional model calls. Unknown, duplicate, missing and empty keys are rejected; the final checkpoint waits for successful turn completion. No semantic review model is enabled.
+
+A live 341-cue English-to-Simplified-Chinese run with `gpt-6-luna`, low reasoning, used one thread and one turn: 65.1 seconds, 15,542 input tokens (0 cached), 5,021 output tokens, 20,563 total. Seven timeline windows were saved. Inspection of the previously shifted regions showed the later dialogue aligned again, and the ending music cues were no longer duplicate padding. This sampled semantic check does not establish that every translation is correct.
+
+The abandoned per-cue/new-thread experiment was stopped before completing the episode. Its first 59 cues used 349,464 input tokens (238,336 cached) and 1,560 output tokens. These partial numbers do not support an exact full-episode timing or token ratio. The per-cue and review-model paths were removed from production.
+
 Windows / Node.js 22.23.1 / Codex CLI 0.160.0 / Chrome. Timings are observations on this machine, not guarantees.
 
 ## 0.6.0 (2026-10-05)
@@ -38,3 +52,25 @@ Not yet verified in the browser: a whole Codex episode with numbered output, and
 - Long continuous playback and rate limits.
 - Audio-only recognition (out of scope).
 - Sequential TTML containers, drop-frame timecodes, SAMI, segmented VTT time mapping.
+
+
+## Disney+ 0.9.3 - Windows Chrome live check (2026-10-06)
+
+- The Simpsons S1E1: English finite HLS WebVTT playlist captured through the restricted CDN fallback; 516 cues translated by Codex and restored from the local SQLite cache after page refresh.
+- The player retained a hidden, empty video beside visible hivePlayer1 and reported infinite media duration. Visible-video selection and playlist-duration fallback cover this observed layout.
+- Hive media time 54.242676 corresponded to the native pause announcement at 34.242 seconds. The extension learned the approximately 20-second offset from public player controls. Native English CC and the bilingual overlay both displayed the same galoshes dialogue at this position; native CC was restored to Off after comparison.
+- The offset persists when controls disappear. Before the initial clock sample, a Hive player shows a prompt to reveal controls or pause, instead of using an uncalibrated media clock. Progress percentages have subsecond rounding limits; the English pause announcement offers finer calibration.
+- All 77 automated tests passed. Coverage includes public shadow-DOM calibration, retained offset, route reset and waiting for a clock sample, alongside subtitle capture and security regression tests.
+- Not verified: a complete uninterrupted viewing, ad breaks, autoplay between titles, other UI locales, worker-only playback metadata and mid-stream presentation discontinuities. No release was published.
+
+
+## Ad recovery and user-managed credentials (2026-10-06)
+
+All 100 automated tests pass; `npm run build` succeeds. New player tests cover Hulu and Disney ad transitions, stale pre-ad clocks, mismatched ad durations, repeated breaks, seek suppression, and a precise pause sample winning over stale controls. These are simulated DOM regressions, not a live ad-tier verification. Automatic recovery still depends on recognized ad markers and fresh public player controls.
+
+A mocked Google request verifies that the user-selected key file takes precedence, is sent directly to the Google endpoint, and fails without fallback if missing or empty. No live translation request was needed for these checks.
+
+
+## Hulu clock drift (2026-10-06)
+
+Read-only inspection of the current Hulu player found `content-video-player.currentTime=215.949045`, integer timeline `215`, and an extension offset of `1.53974` seconds. That synthetic offset delayed subtitle rendering. Hulu's dedicated content player now uses its own precise clock and ignores the rounded timeline for calibration, including after ads. Disney retains its separate presentation-offset logic. Regression tests also reject repeated frozen timeline samples and stale CSS progress widths. Live playback after installing this fix remains to be confirmed by the user.

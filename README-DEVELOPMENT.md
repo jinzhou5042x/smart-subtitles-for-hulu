@@ -8,7 +8,7 @@ A local Windows service plus a Chrome extension that shows bilingual subtitles o
 
 1. Double-click **Start Subtitles.cmd** to start the service (**Check Environment.cmd** checks Node, Codex and the service).
 2. In Chrome open `chrome://extensions/`, enable developer mode and load the `dist\extension` folder of this project (created by `npm run build` or the start script).
-3. After an update, click the extension's reload icon and refresh the Hulu page. Current version: **0.9.2**.
+3. After an update, click the extension's reload icon and refresh the Hulu page. Current version: **0.9.4**.
 4. The popup has the subtitle toggle, the target language, the translator and episode progress; on failure it offers a retry.
 5. Drag the subtitle lines with the mouse to move them up or down (vertical only). The position is kept as a share of the picture height, across full screen, episodes and reloads. Dragging never reaches the player.
 
@@ -22,11 +22,12 @@ Subtitles are translated from English into any language of the shared list in `s
 
 When a video opens, the extension reads the complete subtitle file and timeline from Hulu's playback metadata, loaded subtitle responses or a complete TextTrack. Without a complete file it waits or reports an error; it never falls back to reading captions frame by frame.
 
-- **Codex** gets the whole episode in one input: every subtitle numbered 1..n with its original text, no times. It returns one output with exactly one translation per number, in order (no merging, splitting or skipping). The output is parsed as it streams: each translation whose number continues the sequence is accepted and shown at once with its source cue's timestamps. If an attempt fails (a skipped or out-of-order number, an incomplete output), only the subtitles not yet accepted are sent again, with the accepted ones as context; an attempt without progress reports an error, and a retry also resumes after the accepted subtitles.
-- **Local** shows each batch once it has been validated, following the video's `currentTime`; a retry continues after the accepted batches.
-- **Google** shows the result when all requests have returned.
+- The Codex app-server process stays resident. Each episode uses one thread, one input containing the full English subtitles, and one structured output. No per-cue requests or review-model calls.
+- Each output key is the exact original start–end timestamp in seconds, with no index. Its value is `{"source":"verbatim English","translation":"translated fragment"}`. Source must appear first, and both timestamps and source text must match exactly, including original whitespace. Runtime checks enforce source equality because strict output schemas reject newline-containing enum literals. Unknown or duplicate timestamps, altered source text, duplicate fields, missing cues and empty translations fail validation. Overlapping cues with identical start/end times use an array under that timestamp and match by exact source, without merging cues.
+- As that same response streams, complete contiguous windows of 60 seconds of video time are committed to SQLite and read back before publication. The frontend receives saved translations only. A failed write or read-back stops publication. No model requests are made at checkpoint boundaries. The final window waits for successful turn completion and full JSON validation.
+- A retry keeps saved windows and sends the complete episode as context once, requesting only unsaved output keys. It does not retry automatically within the model call.
 
-Seeking past the translated part shows no bilingual subtitle until it is reached. Only a complete, validated episode enters the cache.
+These checks establish the key mapping and structural completeness. They cannot prove that the model translated the correct meaning into each slot. Seeking past the saved part shows no bilingual subtitle until it is ready.
 
 ## Translation database
 
@@ -36,9 +37,9 @@ Translations are stored on this computer in `data/episodes/subtitles.sqlite`:
 - `translations`: per source `hash`, `target` language and `provider`, `done` (how many cues, counted from idx 0, are translated) and `complete`.
 - `lines`: the translated text per `(hash, target, provider, idx)`; `span` is 2 when the local model merged two cues into one line, otherwise 1.
 
-A translation is written while it streams (at most once a second, and once more when it stops), so it may end at any idx. After a reload, a closed tab, a cancellation, an error such as a Codex usage limit, or a restart of the service, opening the same subtitles again resumes after `done` instead of starting over; the last accepted lines are sent as context only. A complete translation is validated before it is marked complete and is never overwritten by the same provider. The 0.9.0 `episodes` table is migrated on first start.
+A complete window is saved in one transaction. `binding_version=1` identifies results with explicit source-slot binding. Older results are archived in `legacy_translations` and excluded from playback; they must be regenerated because correct numbering does not establish that each translation belongs to its source. The 0.9.0 `episodes` table is migrated on first start.
 
-- The first complete result is reused by every mode, except that a **Codex** result replaces a local or Google one: Codex reads the whole episode at once, the others work batch by batch or line by line.
+- The first complete result is reused by every mode, except that a **Codex** result can replace a local or Google one.
 - Switching to Codex on an episode already translated by another mode keeps showing that translation until the Codex result is complete, then replaces it.
 - Switching mode or language re-requests the episode; an adequate stored result returns immediately.
 - Measured size: about 300 KB per 97-minute, 2310-subtitle episode (source and translation), i.e. roughly 2–4 GB for 10,000 two-hour films.
@@ -64,7 +65,7 @@ Evaluation: `node scripts/test-local.mjs` checks idioms; `node scripts/test-loca
 
 ## Codex and Google
 
-Codex uses the official `codex app-server` with the existing ChatGPT login; no API key. The temporary thread has no file system, shell, browser or app tools, and subtitles are data only. Subtitles go to the account's model service and use its quota. The default is `gpt-6-luna` with `low` reasoning (`config/default.json`). The numbered output takes about 28 characters per subtitle; 600 real subtitles took 128 s, so a 2300-subtitle episode takes about 8 minutes. Override `model`, `effort`, `translationTimeoutMs` or `glossary` in `config/local.json`.
+Codex uses the official `codex app-server` with the existing ChatGPT login; no API key. The temporary thread has no file system, shell, browser or app tools, and subtitles are data only. Subtitles go to the account's model service and use its quota. The default is `gpt-6-luna` with `low` reasoning (`config/default.json`). Output binds each translation to its exact original timestamp and source text; completion time depends on episode length and provider load. Override `model`, `effort`, `translationTimeoutMs` or `glossary` in `config/local.json`.
 
 Google uses the official Cloud Translation Basic v2 within its limits of 128 strings and 5000 characters per request. Add `"googleApiKey": "..."` to `config/local.json` (or set `GOOGLE_TRANSLATE_API_KEY`) and restart. The key stays in the local service. Subtitles are sent to Google and billed to that account. Google translates every line independently, so sentences split across cues and context-dependent lines are often wrong.
 
@@ -72,7 +73,7 @@ Google uses the official Cloud Translation Basic v2 within its limits of 128 str
 
 The service listens only on `127.0.0.1:43127`; private endpoints require the random pairing token. Do not share `config/local.json` (it may contain the Google key) or `local-connection.json` in the build directory. Project files, logs and caches stay in this directory.
 
-Supported subtitles: SRT/VTT and common TTML (inherited timing and nested span timing). Not supported: segmented VTT time mapping, sequential TTML, drop-frame timecodes, SAMI, audio-only recognition. The extension never downloads video or decryption keys.
+Supported subtitles: SRT/VTT and common TTML (inherited timing and nested span timing). Not supported: live HLS playlists, encrypted subtitles, sequential TTML, drop-frame timecodes, SAMI, audio-only recognition. The extension never downloads video or decryption keys.
 
 Restart the service after changing configuration; double-click **Stop Subtitles.cmd** to stop it.
 
@@ -89,7 +90,7 @@ Restart the service after changing configuration; double-click **Stop Subtitles.
 | Service | `service/server.mjs`, `episodes.mjs`, `jobs.mjs`, `database.mjs` | HTTP API on 127.0.0.1, per-episode state, up to `maxAgents` (16) translations at once, SQLite. |
 | Translators | `service/codex.mjs`, `google.mjs`, `local*.mjs`, `translation.mjs` | Codex app-server threads (token usage included), Google, local model; prompts and validation. |
 
-Ad breaks: Hulu plays ads in a separate player while the episode stands still, so subtitle times stay on the episode's clock. The overlay hides during every ad break (pre-roll and mid-roll, also while an ad is paused) and the popup waits for the episode to start before it reports that no subtitles were found.
+Ad breaks: the overlay hides while a detected ad is playing. After the break, the player profile discards the old clock offset and waits for fresh content timing before showing subtitles again. The overlay hides during every ad break (pre-roll and mid-roll, also while an ad is paused) and the popup waits for the episode to start before it reports that no subtitles were found.
 
 ## Releasing
 
@@ -115,3 +116,21 @@ User research (complaints about dual-subtitle tools, competitors, Hulu's web pla
 - **Branding:** the product is named "Smart Subtitles for Hulu" and uses its own logo in a darker green than Hulu's brand colour, with an "unofficial" notice, so it is not mistaken for an official Hulu product.
 - **Third-party software:** llama.cpp (MIT, © The ggml authors) and the Hy-MT2-7B model (Apache-2.0, © Tencent); their license files are in `runtime/llama.cpp` and `models/Hy-MT2-7B`.
 - These texts reduce risk but are not legal advice; have them reviewed before a wide public release.
+
+## Disney+ (0.9.3)
+
+`extension/sites.js` centralizes trusted website origins and Disney subtitle CDN validation; both script worlds and the background worker load it. `site.js` recognizes Disney+ `/play/` and `/video/` routes with optional locale prefixes, selects the visible video and uses finite HLS playlist duration when video.duration is infinite. Disney content time is calibrated from the public shadow-DOM progress bar or millisecond pause announcement, then retained when controls decay. Uncalibrated Hive players show a sync prompt instead of mistimed dialogue. Hulu keeps its own player and timeline selection.
+
+`capture.js` observes playback JSON including `/media/.../scenarios/...`, follows HLS master URLs, selects non-forced English subtitle tracks, joins finite WebVTT playlists and deduplicates boundary cues. A CORS failure on `.dssott.com` or `.dssedge.com` subtitle/playlist files can use a bounded extension fetch, with no cookies and no redirects. It cannot request video segments, license endpoints, arbitrary hosts or local addresses. This requires the additional CDN host permissions in the manifest. Native caption settings remain under user control.
+
+Validation: `node --test tests/disney.test.mjs` exercises origin checks, locale routes, video selection, full screen parent selection, Hulu ad regression, Disney playback JSON to HLS subtitles, live/encrypted playlist rejection and bounded CDN reads. Live validation on Windows Chrome captured and translated all 516 English cues from The Simpsons S1E1, restored them from the local cache after refresh, and matched a displayed line against native English CC. That Hive player had a 20-second presentation offset, calibrated from its controls rather than hardcoded. Progress-bar calibration has subsecond rounding limits; the English pause announcement gives millisecond precision. Worker-only playback metadata, extensionless segments, mid-stream discontinuities, ad layouts, and other UI locales remain unverified. See docs/VALIDATION.md.
+
+
+## Your API key
+
+Translation requests go directly from the local companion to the selected provider, without a project-operated relay. Codex uses your existing login. For Google, store the key alone in a UTF-8 text file outside the repository, at a location you control, and set `googleApiKeyFile` in `config/local.json` to its absolute path (for example `C:/Users/you/Keys/google-translate.txt`). Enable `google` in `providers` if needed, then restart the companion. The key file takes precedence over the legacy `googleApiKey` setting and `GOOGLE_TRANSLATE_API_KEY` environment variable. An unreadable or empty selected file fails rather than silently using another key. Keep that file private to your Windows account; it is not copied into the extension or cache.
+
+Disney ad recovery invalidates its presentation offset on detected ad transitions. Hulu uses its dedicated content video clock unchanged, before and after ads; its integer UI timeline must never calibrate subtitle time. While waiting, it sends up to four mouse-move events to reveal controls, without pausing or seeking. Subtitles remain hidden until a fresh timeline or pause announcement supplies a content clock. An unchanged slider is rejected after the break; a previously known content duration also guards against reading an ad timeline. New pages reset this state. This depends on the site's exposed ad markers and timing controls; real ad-tier playback remains unverified.
+
+
+Clock incident and regression requirements: [Hulu subtitle clock drift](docs/incidents/2026-10-06-subtitle-clock-drift.md).

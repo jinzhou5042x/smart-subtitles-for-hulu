@@ -25,7 +25,7 @@ async function popup(target, info, height) {
     .replace('href="popup.css"', `href="${ext('popup.css')}"`).replace('src="icon.svg"', `src="${ext('icon.svg')}"`)
     .replace('<script src="popup.js" type="module"></script>', `<style>*,*:before,*:after{transition:none!important}</style><script>${stub}</script><script src="${ext('popup.js')}" type="module"></script>`);
   const file = path.join(work, `popup-${target}.html`); await writeFile(file, html);
-  shot(file, `work/popup-${target}.png`, 320, height, 2);
+  shot(file, `work/popup-${target}.png`, 360, height, 2);
   return pathToFileURL(path.join(out, `work/popup-${target}.png`)).href;
 }
 const scene = (title, translation, original, popupImage, caption) => `<!doctype html><html><head><meta charset="utf-8"><style>
@@ -37,8 +37,8 @@ body{margin:0;width:1280px;height:800px;overflow:hidden;font-family:system-ui,"S
 .subs{position:absolute;left:0;right:0;bottom:34px;display:flex;flex-direction:column;align-items:center;gap:8px}
 .subs div{background:rgba(10,12,16,.58);backdrop-filter:blur(8px) saturate(1.2);border-radius:.22em;padding:.1em .5em .14em;box-shadow:0 .08em .5em rgba(0,0,0,.22),inset 0 0 0 1px rgba(255,255,255,.06);text-shadow:0 1px 2px rgba(0,0,0,.6);line-height:1.22}
 .t{font-size:38px;font-weight:600}.o{font-size:26px;font-weight:450;color:rgba(255,255,255,.88);background:rgba(10,12,16,.42)!important}
-.popup{position:absolute;right:40px;top:96px;width:320px;border-radius:14px;box-shadow:0 18px 50px #0008;overflow:hidden}
-.popup img{display:block;width:320px}
+.popup{position:absolute;right:40px;top:96px;width:360px;border-radius:14px;box-shadow:0 18px 50px #0008;overflow:hidden}
+.popup img{display:block;width:360px}
 h1{position:absolute;left:40px;top:28px;margin:0;font-size:30px;font-weight:650}
 p{position:absolute;left:40px;top:612px;width:860px;margin:0;font-size:22px;line-height:1.5;color:#c9d1d9}
 .mark{color:#3fd18b}
@@ -47,9 +47,9 @@ p{position:absolute;left:40px;top:612px;width:860px;margin:0;font-size:22px;line
 <div class="popup"><img src="${popupImage}"></div><p>${caption}</p></body></html>`;
 
 const screens = [
-  ['screenshot-1.png', 'Understand every line, <span class="mark">in your language</span>', 'Il m’a fait porter le chapeau.', 'He threw me under the bus.', await popup('fr', { tone: 'done', status: 'Episode subtitles ready', detail: 'Synced to the original timing', total: 2310, translated: 2310, elapsedMs: 452000, usage: { input: 61840, cachedInput: 38200, output: 70510, reasoning: 3120 } }, 456),
+  ['screenshot-1.png', 'Understand every line, <span class="mark">in your language</span>', 'Il m’a fait porter le chapeau.', 'He threw me under the bus.', await popup('fr', { tone: 'done', status: 'Episode subtitles ready', detail: 'Synced to the original timing', total: 2310, translated: 2310, elapsedMs: 452000, usage: { input: 61840, cachedInput: 38200, output: 70510, reasoning: 3120 } }, 458),
     'The original English subtitles stay on screen, with a natural translation right above them. Slang, sarcasm and idioms are translated by meaning, not word for word.'],
-  ['screenshot-2.png', 'English to <span class="mark">55 languages</span>', 'Genial. Justo lo que me faltaba.', 'Oh, great. Just what I needed.', await popup('es', { tone: 'working', status: 'Receiving the Codex translation', total: 2310, translated: 412, elapsedMs: 92000, usage: { input: 30920, cachedInput: 0, output: 12580, reasoning: 640 } }, 433),
+  ['screenshot-2.png', 'English to <span class="mark">55 languages</span>', 'Genial. Justo lo que me faltaba.', 'Oh, great. Just what I needed.', await popup('es', { tone: 'working', status: 'Receiving the Codex translation', total: 2310, translated: 412, elapsedMs: 92000, usage: { input: 30920, cachedInput: 0, output: 12580, reasoning: 640 } }, 429),
     'Pick a language and a translator. Subtitles appear within seconds and follow the original timing; drag them up or down, and set the size you like.']
 ];
 for (const [file, title, translation, original, popupImage, caption] of screens) {

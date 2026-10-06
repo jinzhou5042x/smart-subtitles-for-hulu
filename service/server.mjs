@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { configureGoogle } from './google-settings.mjs';
 import { timingSafeEqual } from 'node:crypto';
 import { readFile, appendFile, access } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -64,7 +65,8 @@ export function createServer(config, queue, episodes) {
     }
     if (!tokenMatches(req.headers.authorization, `Bearer ${config.pairingToken}`)) return json(401, { error: 'Pairing token required' });
     try {
-      if (req.method === 'GET' && url.pathname === '/status') return json(200, { app: 'hulu-context-subtitles', queued: [...queue.jobs.values()].filter(j => j.status === 'queued').length, running: queue.running, maxAgents: queue.limit, model: config.model || 'Codex default model', providers: enabledProviders(config) });
+      if (req.method === 'GET' && url.pathname === '/status') return json(200, { app: 'hulu-context-subtitles', queued: [...queue.jobs.values()].filter(j => j.status === 'queued').length, running: queue.running, maxAgents: queue.limit, model: config.model || 'Codex default model', providers: enabledProviders(config), availableProviders: [...new Set([...enabledProviders(config), 'google'])], googleConfigured: !!(config.googleApiKeyFile || config.googleApiKey || process.env.GOOGLE_TRANSLATE_API_KEY) });
+      if (req.method === 'POST' && url.pathname === '/settings/google') return json(200, await configureGoogle(config, await readJson(req, 4096)));
       if (req.method === 'POST' && url.pathname === '/episodes' && episodes) {
         const request = validateRequest(await readJson(req, 8_000_000));
         if (!enabledProviders(config).includes(request.provider)) throw new Error(`The ${request.provider} translator is not enabled`);
@@ -91,14 +93,25 @@ export function createServer(config, queue, episodes) {
 
 async function main() {
   const config = await loadConfig();
+  config.requireBinding = true;
+  const { translateCheckpoints } = await import('./checkpoints.mjs');
+  const { addUsage } = await import('./database.mjs');
   const translators = Object.fromEntries(await Promise.all(enabledProviders(config).map(async p => [p, await TRANSLATORS[p](config)])));
   const closeAll = () => { for (const t of Object.values(translators)) t.close?.(); };
   const queue = new JobQueue({ translate: async (request, signal, progress) => {
     // Recheck at execution time: another queued mode may have just completed this hash.
     if (request.wholeEpisode) { const cached = episodes.database.get(request); if (cached) return cached; }
+    if (!translators[request.provider] && enabledProviders(config).includes(request.provider)) translators[request.provider] = await TRANSLATORS[request.provider](config);
     const translator = translators[request.provider];
     if (!translator) throw new Error(`The ${request.provider} translator is not enabled`);
-    const segments = await translator.translate(request, signal, progress);
+    const baseUsage = request.wholeEpisode ? episodes.database.usage(request, { partial: true }) : null;
+    const segments = await translateCheckpoints(request, translator, signal, progress,
+      (accepted, usage) => {
+        if (request.wholeEpisode) {
+          episodes.database.save(request, accepted, { usage: addUsage(baseUsage, usage) });
+          return episodes.database.get(request) || episodes.database.partial(request);
+        }
+      });
     signal.throwIfAborted();
     return segments;
   } }, config);

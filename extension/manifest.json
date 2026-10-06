@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Smart Subtitles for Hulu",
-  "version": "0.9.2",
-  "description": "Bilingual AI subtitles for Hulu videos. Unofficial; not affiliated with Hulu.",
+  "version": "0.9.4",
+  "description": "Bilingual AI subtitles for Hulu and Disney+ videos. Unofficial; not affiliated with Disney or Hulu.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -12,10 +12,15 @@
   "minimum_chrome_version": "120",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
   "host_permissions": [
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "https://*.disneyplus.com/*",
+    "https://disneyplus.com/*",
+    "https://*.dssott.com/*",
+    "https://*.dssedge.com/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -34,9 +39,12 @@
       "matches": [
         "https://*.hulu.com/*",
         "https://hulu.com/*",
-        "http://127.0.0.1/*"
+        "http://127.0.0.1/*",
+        "https://*.disneyplus.com/*",
+        "https://disneyplus.com/*"
       ],
       "js": [
+        "sites.js",
         "capture.js"
       ],
       "run_at": "document_start",
@@ -47,9 +55,12 @@
       "matches": [
         "https://*.hulu.com/*",
         "https://hulu.com/*",
-        "http://127.0.0.1/*"
+        "http://127.0.0.1/*",
+        "https://*.disneyplus.com/*",
+        "https://disneyplus.com/*"
       ],
       "js": [
+        "sites.js",
         "core.js",
         "ttml.js",
         "site.js",

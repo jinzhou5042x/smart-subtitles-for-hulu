@@ -4,11 +4,11 @@ import { root } from './config.mjs';
 import { cacheKey, validateTranslation } from './translation.mjs';
 import { SubtitleDatabase, episodeHash, addUsage } from './database.mjs';
 
-export const EPISODE_VERSION = 4;
+export const EPISODE_VERSION = 6;
 const covered = segments => segments.reduce((n, segment) => n + segment.sourceIds.length, 0);
 
-// Tracks whole-episode translations. Accepted translations of an unfinished episode are written to
-// the database as they arrive, under the subtitles' hash, the target language and the translator,
+// Tracks whole-episode jobs. Completed one-minute sections of an unfinished episode are written to
+// the database before publication, under the subtitles' hash, the target language and the translator,
 // independent of the page, tab or request: after a reload, a closed tab, a cancellation, an error
 // (e.g. a usage limit) or a restart of the service, the next request for the same subtitles resumes
 // after them. Only a complete, validated translation is marked complete.
@@ -97,7 +97,7 @@ export class EpisodeManager {
     const preview = !accepted.length && this.database.get(e.request, { fallback: true });
     if (preview) e.segments = preview;
     try {
-        let job = this.queue.submit({ ...e.request, accepted, client: `episode-${e.id}`, epoch: String(e.started), context: [{ text: 'Translate this entire episode in one response, using all dialogue as context.' }], wholeEpisode: true });
+        let job = this.queue.submit({ ...e.request, accepted, client: `episode-${e.id}`, epoch: String(e.started), context: [], wholeEpisode: true });
         while (['queued', 'running'].includes(job.status)) {
           e.status = job.status;
           if (job.progress) {
@@ -116,15 +116,25 @@ export class EpisodeManager {
           job = this.queue.get(job.id);
           if (!job) throw new Error('Episode task expired');
         }
+        if (job?.progress?.usage) e.usage = addUsage(baseUsage, job.progress.usage);
         if (!e.cancelled) {
           if (job.status !== 'done') throw new Error(job.error || 'Episode translation cancelled');
           const complete = validateTranslation({ segments: job.segments }, e.request.cues);
           e.dirty = false; this.database.put(e.request, complete, e.usage);
-          e.segments = this.database.get(e.request) || complete;
+          const stored = this.database.get(e.request);
+          if (!stored) throw new Error('Saved subtitles could not be read back');
+          e.segments = stored;
           e.completedCues = e.request.cues.length;
         }
       e.status = e.cancelled ? 'cancelled' : 'done';
     } catch (error) { e.status = 'error'; e.error = error.message; }
-    finally { this.flush(e); e.finished = Date.now(); e.running = false; }
+    finally {
+      this.flush(e);
+      // A fast checkpoint followed by an error can fall between polling ticks.
+      if (this.config.requireBinding && e.status !== 'done') {
+        e.accepted = this.recall(e); e.segments = e.accepted; e.completedCues = covered(e.accepted);
+      }
+      e.finished = Date.now(); e.running = false;
+    }
   }
 }

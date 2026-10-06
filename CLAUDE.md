@@ -27,6 +27,12 @@ sign-in. Everything stays on the user's computer; there is no server of ours.
 - Local only: each user runs the service with their own ChatGPT/Codex account and their own data.
   A shared family/central backend was built and dropped; do not reintroduce it.
 - Model `gpt-6-luna`, effort `low` (`config/default.json`). The release enables Codex only.
+- Keep Codex resident. One episode uses one input and one output, never one request per cue.
+  Output uses fixed original start–end timestamps, with verbatim source FIRST then translation.
+  Require exact timestamp + source matches; no fuzzy matching, merging or moving cue fragments.
+  Save and read back complete 1-minute video windows before publishing; checkpoints must not
+  cause model calls. No review-model gate.
+- Hulu clock invariant: use dedicated content-video-player.currentTime unchanged; NEVER calibrate it from the rounded UI timeline. Disney has a separate offset policy. See docs/incidents/2026-10-06-subtitle-clock-drift.md before changing clock code.
 - Up to 16 videos translate at once (`maxAgents`); closing a tab stops its translation, a reload
   resumes from the progress saved in SQLite.
 - Real dialogue in tests and docs is fine. Personal information about the owner is not (below).
@@ -78,3 +84,7 @@ sign-in. Everything stays on the user's computer; there is no server of ours.
    swap their order; colour/opacity; keyboard shortcuts.
 4. P2+: learning features (word lookup, export) only if the audience asks; non-English sources,
    several target languages, SAMI, Live TV last.
+
+## Local follow-up: Disney+ implementation (0.9.3)
+
+Disney+ playback profiles, sender validation, settings broadcasts, English HLS discovery and a restricted CDN CORS fallback are now implemented. See README-DEVELOPMENT.md and tests/disney.test.mjs. Windows Chrome live validation captured and translated 516 cues from The Simpsons S1E1 and matched native English CC after public-control clock calibration. See docs/VALIDATION.md for evidence and remaining limitations. Ad tiers and long playback remain unverified. No release upload or push was performed.

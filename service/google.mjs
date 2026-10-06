@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { validateTranslation } from './translation.mjs';
 
 function decode(text) {
@@ -8,14 +9,19 @@ function decode(text) {
 }
 export class GoogleTranslator {
   constructor(config, fetcher = fetch) { this.config = config; this.fetcher = fetcher; }
-  async translate(request, signal) {
+  async translate(request, signal, progress = () => {}) {
     signal?.throwIfAborted();
-    const key = this.config.googleApiKey || process.env.GOOGLE_TRANSLATE_API_KEY;
-    if (!key) throw new Error('Set googleApiKey in config/local.json and restart the subtitle service');
+    let key;
+    if (this.config.googleApiKeyFile) {
+      try { key = (await readFile(this.config.googleApiKeyFile, 'utf8')).trim(); }
+      catch { throw new Error('Cannot read googleApiKeyFile; check your chosen key file'); }
+    } else key = this.config.googleApiKey || process.env.GOOGLE_TRANSLATE_API_KEY;
+    if (!key) throw new Error('Set googleApiKeyFile in config/local.json to your key file path and restart the subtitle service');
     const target = request.target; // Language codes are Google Cloud Translation codes.
-    const segments = [];
+    const segments = [...(request.accepted || [])];
+    const acceptedCount = segments.reduce((n, s) => n + s.sourceIds.length, 0);
     // Google v2 accepts at most 128 strings. Keep requests below 5,000 code points.
-    for (let start = 0; start < request.cues.length;) {
+    for (let start = acceptedCount; start < request.cues.length;) {
       signal?.throwIfAborted();
       let end = start, characters = 0;
       while (end < request.cues.length && end - start < 128) {
@@ -25,7 +31,7 @@ export class GoogleTranslator {
       }
       const cues = request.cues.slice(start, end);
       const response = await this.fetcher('https://translation.googleapis.com/language/translate/v2', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key },
+        method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key },
         body: JSON.stringify({ q: cues.map(c => c.text), source: 'en', target, format: 'text' }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000)
       });
@@ -34,6 +40,8 @@ export class GoogleTranslator {
       const data = await response.json(), translations = data.data?.translations;
       if (!Array.isArray(translations) || translations.length !== cues.length || translations.some(t => typeof t.translatedText !== 'string')) throw new Error('Google returned an incomplete or malformed result');
       segments.push(...translations.map((t, i) => ({ sourceIds: [cues[i].id], text: decode(t.translatedText) })));
+      validateTranslation({ segments }, request.cues.slice(0, end));
+      progress({ partialSegments: [...segments] });
       start = end;
     }
     signal?.throwIfAborted();

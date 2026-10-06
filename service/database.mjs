@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { validateTranslation } from './translation.mjs';
 
-// Codex reads the whole episode at once; its result may replace a batch/sentence-level one.
+// Prefer a Codex translation when more than one provider has a result.
 export const providerRank = provider => provider === 'codex' || !provider ? 2 : 1;
 export function subtitleHash(cues) {
   return createHash('sha256').update(JSON.stringify(cues.map(c => [c.start, c.end, c.text.normalize('NFC').replace(/\s+/g, ' ').trim()]))).digest('hex');
@@ -22,7 +22,7 @@ export const episodeHash = request => createHash('sha256').update(JSON.stringify
 //   from idx 0) are translated, whether the translation is complete, and the tokens it used so far.
 // - lines: the translated text by the idx of its first cue; `span` is 2 when a translator merged
 //   two cues into one line (local mode), otherwise 1.
-// A partial translation is written as it arrives, so it survives a restart of the service and is resumed.
+// Production writes complete windows of independently bound cues; old lines remain archived.
 export class SubtitleDatabase {
   constructor(file, config) { this.file = file; this.config = config; }
   open() {
@@ -33,7 +33,21 @@ export class SubtitleDatabase {
       CREATE TABLE IF NOT EXISTS lines(hash TEXT NOT NULL, target TEXT NOT NULL, provider TEXT NOT NULL, idx INTEGER NOT NULL, span INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(hash, target, provider, idx));`);
     const columns = new Set(db.prepare('PRAGMA table_info(translations)').all().map(c => c.name));
     for (const column of Object.values(USAGE)) if (!columns.has(column)) db.exec(`ALTER TABLE translations ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+    if (!columns.has('binding_version')) db.exec('ALTER TABLE translations ADD COLUMN binding_version INTEGER NOT NULL DEFAULT 0');
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episodes'").get()) this.migrate(db);
+    if (this.config.requireBinding) {
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_drafts'").get() && !db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_translations'").get()) db.exec('ALTER TABLE review_drafts RENAME TO legacy_translations');
+      db.exec('CREATE TABLE IF NOT EXISTS legacy_translations(hash TEXT, target TEXT, provider TEXT, lines TEXT NOT NULL, PRIMARY KEY(hash,target,provider)); BEGIN IMMEDIATE');
+      try {
+        for (const row of db.prepare('SELECT hash,target,provider FROM translations WHERE binding_version=0').all()) {
+          const args = [row.hash, row.target, row.provider];
+          const lines = db.prepare('SELECT idx,span,text FROM lines WHERE hash=? AND target=? AND provider=? ORDER BY idx').all(...args);
+          db.prepare('INSERT OR IGNORE INTO legacy_translations VALUES(?,?,?,?)').run(...args, JSON.stringify(lines));
+          this.forget(db, ...args);
+        }
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
+    }
     return db;
   }
   // Moves complete episodes of 0.9.0 (one row per subtitles + target) into the shared tables.
@@ -123,6 +137,7 @@ export class SubtitleDatabase {
         const line = db.prepare('INSERT OR REPLACE INTO lines VALUES(?,?,?,?,?,?)');
         for (const l of lines) if (!append || l.idx >= from) line.run(hash, request.target, provider, l.idx, l.span, l.text);
         db.prepare(`INSERT OR REPLACE INTO translations(hash, target, provider, done, complete, updated_at, ${USAGE_COLUMNS}) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(hash, request.target, provider, count, complete ? 1 : 0, now, ...tokens);
+        if (this.config.requireBinding) db.prepare('UPDATE translations SET binding_version=1 WHERE hash=? AND target=? AND provider=?').run(hash, request.target, provider);
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     });
