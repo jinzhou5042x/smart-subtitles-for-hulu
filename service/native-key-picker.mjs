@@ -6,6 +6,18 @@ import path from 'node:path';
 import { root } from './config.mjs';
 
 function pickerExecutable() {
+  if (process.platform === 'darwin') {
+    const bundled = path.join(root, 'runtime/key-picker/picker');
+    if (existsSync(bundled)) return bundled;
+    const source = path.join(root, 'service/key-picker.swift');
+    const hash = createHash('sha256').update(readFileSync(source)).digest('hex').slice(0, 16);
+    const executable = path.join(root, `runtime/key-picker/picker-${hash}`);
+    if (!existsSync(executable)) {
+      mkdirSync(path.dirname(executable), { recursive: true });
+      execFileSync('/usr/bin/swiftc', [source, '-o', executable], { stdio: 'pipe', timeout: 120000 });
+    }
+    return executable;
+  }
   const source = path.join(root, 'service/key-picker.cs');
   const hash = createHash('sha256').update(readFileSync(source)).digest('hex').slice(0, 16);
   const directory = path.join(root, 'runtime/key-picker');
@@ -19,7 +31,8 @@ function pickerExecutable() {
 }
 
 export function launchKeyPicker(mode, report = () => {}, anchor = {}, launch = spawn) {
-  if (process.platform !== 'win32') throw new Error('File selection requires the Windows companion');
+  if (!['win32', 'darwin'].includes(process.platform)) throw new Error('File selection requires the Windows or macOS companion');
+  if (mode !== 'load') throw new Error('Invalid key operation');
   const executable = pickerExecutable();
   const number = (value, fallback, min, max) => Number.isFinite(value) && value >= min && value <= max ? value : fallback;
   const bounds = [number(anchor?.left, 0, -100000, 100000), number(anchor?.top, 0, -100000, 100000), number(anchor?.width, 0, 0, 20000), number(anchor?.height, 0, 0, 20000), number(anchor?.topRatio, 0, 0, 1), number(anchor?.heightRatio, 1, 0.01, 1)];
@@ -48,7 +61,7 @@ export function launchKeyPicker(mode, report = () => {}, anchor = {}, launch = s
     });
     // Consume stderr, but never log raw subprocess output or selected paths.
     child.stderr.resume(); child.stdin.on('error', () => {});
-    child.on('error', () => finish(new Error('Cannot start the Windows file picker.')));
+    child.on('error', () => finish(new Error('Cannot start the native file picker.')));
     child.on('close', () => finish(failure || (resultPath === undefined ? new Error('File selection closed unexpectedly. Try again.') : null)));
     const watchdog = setInterval(() => {
       if ((!windowSeen && Date.now() - started > 20000) || (windowSeen && Date.now() - lastHeartbeat > 10000) || (missingSince && Date.now() - missingSince > 3000)) {

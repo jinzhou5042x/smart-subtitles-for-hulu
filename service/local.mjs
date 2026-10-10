@@ -37,7 +37,7 @@ export class LocalTranslator {
   }
   async boot() {
     if (await this.ready()) { await this.readContextSize(); return; }
-    const binary = path.join(root, 'runtime/llama.cpp/llama-server.exe');
+    const binary = this.config.localServerPath || path.join(root, 'runtime/llama.cpp', process.platform === 'win32' ? 'llama-server.exe' : 'llama-server');
     const model = path.join(root, 'models/Hy-MT2-7B/HY-MT2-7B-Q8_0.gguf');
     await access(binary); await access(model);
     const log = createWriteStream(path.join(root, 'logs/local-model.log'), { flags: 'a' });

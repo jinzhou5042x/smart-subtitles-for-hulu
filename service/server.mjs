@@ -30,7 +30,7 @@ async function readJson(req, limit = 65536) {
   for await (const chunk of req) { bytes += chunk.length; if (bytes > limit) throw new Error('Request too large'); parts.push(chunk); }
   return JSON.parse(Buffer.concat(parts).toString('utf8'));
 }
-export function createServer(config, queue, episodes) {
+export function createServer(config, queue, episodes, codexAccount) {
   const keyPicker = new GoogleKeyPicker(config);
   const httpServer = http.createServer(async (req, res) => {
     const origin = req.headers.origin;
@@ -67,7 +67,7 @@ export function createServer(config, queue, episodes) {
     }
     if (!tokenMatches(req.headers.authorization, `Bearer ${config.pairingToken}`)) return json(401, { error: 'Pairing token required' });
     try {
-      if (req.method === 'GET' && url.pathname === '/status') return json(200, { app: 'hulu-context-subtitles', queued: [...queue.jobs.values()].filter(j => j.status === 'queued').length, running: queue.running, maxAgents: queue.limit, model: config.model || 'Codex default model', providers: enabledProviders(config), availableProviders: [...new Set([...enabledProviders(config), 'google'])], googleConfigured: config.googleApiKeyFile !== null && !!(config.googleApiKeyFile || config.googleApiKey || process.env.GOOGLE_TRANSLATE_API_KEY), googleApiKeyFile: config.googleApiKeyFile || null, googlePicker: keyPicker.get() });
+      if (req.method === 'GET' && url.pathname === '/status') return json(200, { app: 'hulu-context-subtitles', queued: [...queue.jobs.values()].filter(j => j.status === 'queued').length, running: queue.running, maxAgents: queue.limit, model: config.model || 'Codex default model', providers: enabledProviders(config), availableProviders: [...new Set([...enabledProviders(config), 'google'])], googleConfigured: config.googleApiKeyFile !== null && !!(config.googleApiKeyFile || config.googleApiKey || process.env.GOOGLE_TRANSLATE_API_KEY), googleApiKeyFile: config.googleApiKeyFile || null, googlePicker: keyPicker.get(), ...(codexAccount && enabledProviders(config).includes('codex') ? { codex: codexAccount.get(), codexSignIn: codexAccount.describe() } : {}) });
       if (req.method === 'POST' && url.pathname === '/settings/google/picker/focus') { const { id } = await readJson(req); return json(200, keyPicker.focus(id)); }
       if (req.method === 'POST' && url.pathname === '/settings/google/picker/cancel') { const { id } = await readJson(req); return json(200, keyPicker.cancel(id)); }
       if (req.method === 'POST' && url.pathname === '/settings/google/picker') return json(202, keyPicker.start(await readJson(req, 4096)));
@@ -75,6 +75,11 @@ export function createServer(config, queue, episodes) {
       if (req.method === 'POST' && url.pathname === '/settings/google') {
         if (keyPicker.get()?.status === 'pending') throw new Error('Finish or cancel file selection first');
         return json(200, await configureGoogle(config, await readJson(req, 4096)));
+      }
+      // The Codex account, managed from the popup: fixed commands of Codex itself, no arguments.
+      if (req.method === 'POST' && url.pathname.startsWith('/settings/codex/') && codexAccount && enabledProviders(config).includes('codex')) {
+        const action = { 'sign-in': () => codexAccount.startSignIn(), 'sign-out': () => codexAccount.signOut(), cancel: () => codexAccount.cancelSignIn() }[url.pathname.slice(16)];
+        if (action) { await action(); return json(202, codexAccount.describe()); }
       }
       if (req.method === 'POST' && url.pathname === '/episodes' && episodes) {
         const request = validateRequest(await readJson(req, 8_000_000));
@@ -108,31 +113,43 @@ async function main() {
   config.requireBinding = true;
   const { translateCheckpoints } = await import('./checkpoints.mjs');
   const { addUsage } = await import('./database.mjs');
+  const { CodexAccount } = await import('./codex-account.mjs');
+  const codexAccount = new CodexAccount(config); void codexAccount.refresh();
   const translators = Object.fromEntries(await Promise.all(enabledProviders(config).map(async p => [p, await TRANSLATORS[p](config)])));
   const closeAll = () => { for (const t of Object.values(translators)) t.close?.(); };
+  // The resident Codex process holds the account it started with; a new one reads the new sign-in.
+  codexAccount.onAccountChange = () => translators.codex?.close?.();
   const queue = new JobQueue({ translate: async (request, signal, progress) => {
-    // Recheck at execution time: another queued mode may have just completed this hash.
+    // Recheck at execution time: another queued request may have just completed this translation.
     if (request.wholeEpisode) { const cached = episodes.database.get(request); if (cached) return cached; }
     if (!translators[request.provider] && enabledProviders(config).includes(request.provider)) translators[request.provider] = await TRANSLATORS[request.provider](config);
     const translator = translators[request.provider];
     if (!translator) throw new Error(`The ${request.provider} translator is not enabled`);
     const baseUsage = request.wholeEpisode ? episodes.database.usage(request, { partial: true }) : null;
-    const segments = await translateCheckpoints(request, translator, signal, progress,
-      (accepted, usage) => {
-        if (request.wholeEpisode) {
-          episodes.database.save(request, accepted, { usage: addUsage(baseUsage, usage) });
-          return episodes.database.get(request) || episodes.database.partial(request);
-        }
-      });
+    let segments;
+    try {
+      segments = await translateCheckpoints(request, translator, signal, progress,
+        (accepted, usage) => {
+          if (request.wholeEpisode) {
+            episodes.database.save(request, accepted, { usage: addUsage(baseUsage, usage) });
+            return episodes.database.get(request) || episodes.database.partial(request);
+          }
+        });
+    } catch (error) {
+      // A failure may be a lost sign-in. Ask Codex; if so, stop the resident process, which
+      // would keep failing, so the next attempt starts one that sees the new sign-in.
+      if (request.provider === 'codex' && !signal.aborted && await codexAccount.refresh() !== 'ready') { translator.close?.(); error.needsUser = true; }
+      throw error;
+    }
     signal.throwIfAborted();
     return segments;
   } }, config);
   const episodes = new EpisodeManager(queue, config);
-  const server = createServer(config, queue, episodes);
+  const server = createServer(config, queue, episodes, codexAccount);
   server.requestTimeout = 15000;
   server.on('error', e => { console.error(e.code === 'EADDRINUSE' ? `Port ${config.port} already in use. Run doctor.` : e.message); closeAll(); process.exitCode = 1; });
-  server.listen(config.port, '127.0.0.1', () => { console.log(`Smart Subtitles for Disney+ & Hulu service: http://127.0.0.1:${config.port} (${enabledProviders(config).join(', ')}; up to ${queue.limit} videos at once)`); void appendFile(path.join(root, 'logs/service.log'), `${new Date().toISOString()} started pid=${process.pid}\n`); });
-  const stop = () => { server.closePicker(); for (const job of queue.jobs.values()) job.controller.abort(); closeAll(); server.close(); setTimeout(() => process.exit(0), 500).unref(); };
+  server.listen(config.port, '127.0.0.1', () => { console.log(`Smart Subtitles service: http://127.0.0.1:${config.port} (${enabledProviders(config).join(', ')}; up to ${queue.limit} videos at once)`); void appendFile(path.join(root, 'logs/service.log'), `${new Date().toISOString()} started pid=${process.pid}\n`); });
+  const stop = () => { codexAccount.cancelSignIn(); server.closePicker(); for (const job of queue.jobs.values()) job.controller.abort(); closeAll(); server.close(); setTimeout(() => process.exit(0), 500).unref(); };
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(e => { console.error(e.message); process.exitCode = 1; });

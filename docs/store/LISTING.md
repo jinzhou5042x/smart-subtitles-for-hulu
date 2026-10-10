@@ -1,12 +1,12 @@
 # Chrome Web Store submission
 
-Everything to paste into the Developer Dashboard for **Smart Subtitles for Disney+ & Hulu**.
-Upload: `dist/store/smart-subtitles-for-disney-plus-and-hulu-<version>.zip` (`npm run package`).
+Everything to paste into the Developer Dashboard for **Smart Subtitles**.
+Upload: `dist/store/smart-subtitles-<version>.zip` (`npm run package`).
 Images: `dist/store/assets/` (`node scripts/store-assets.mjs`).
 
 ## Store listing tab
 
-**Name** (from the manifest): Smart Subtitles for Disney+ & Hulu
+**Name** (from the manifest): Smart Subtitles
 
 **Summary** (from the manifest, max 132 characters):
 Bilingual AI subtitles for Hulu videos. Unofficial; not affiliated with Hulu.
@@ -14,7 +14,7 @@ Bilingual AI subtitles for Hulu videos. Unofficial; not affiliated with Hulu.
 **Description:**
 
 ```
-Smart Subtitles for Disney+ & Hulu shows the original English subtitles of a Hulu video together with a natural translation into your language, right over the player.
+Smart Subtitles shows the original English subtitles of a Hulu video together with a natural translation into your language, right over the player.
 
 • English to 55 languages, including Chinese, Spanish, Japanese, Korean, French, German and Portuguese.
 • Translated in context: slang, sarcasm and idioms are translated by meaning, not word for word.

@@ -5,7 +5,7 @@ import '../shared/languages.js';
 export const languages = globalThis.SubtitleLanguages;
 export const languageName = code => languages.get(code)?.name || code;
 
-export const PROMPT_VERSION = 5;
+export const PROMPT_VERSION = 6;
 export const LOCAL_MODEL = 'Hy-MT2-7B-Q8_0';
 export const LOCAL_PROMPT_VERSION = 6;
 // Shared by validation and the local grammar so the model can only propose merges that validate.
@@ -50,7 +50,9 @@ export function validateRequest(input, maxCues = 20000) {
   const context = Array.isArray(input.context) ? input.context.slice(-12).map(c => ({
     text: bounded(c.text, 1600, 'context'), translation: typeof c.translation === 'string' ? c.translation.slice(0, 2000) : ''
   })) : [];
-  return { provider, target, session, client, epoch, cues, context, title: String(input.title || '').slice(0, 200) };
+  // Translating an episode again: the page's own token for one such attempt.
+  const redo = typeof input.redo === 'string' && /^[a-f0-9-]{36}$/.test(input.redo) ? input.redo : undefined;
+  return { provider, target, session, client, epoch, cues, context, title: String(input.title || '').slice(0, 200), ...(redo ? { redo } : {}) };
 }
 
 export function validateTranslation(raw, cues) {
@@ -69,7 +71,7 @@ export function validateTranslation(raw, cues) {
 
 export function cacheKey(request, config) {
   const { session, target, cues, context } = request;
-  return createHash('sha256').update(JSON.stringify({ v: PROMPT_VERSION, session, target, cues, context, model: request.provider === 'local' ? `${LOCAL_MODEL}-batch-v${LOCAL_PROMPT_VERSION}` : config.model, glossary: config.glossary, ...(request.provider === 'google' ? { provider: 'google-v2' } : request.provider === 'local' ? { provider: 'local-hy-mt2' } : {}) })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ v: PROMPT_VERSION, session, target, cues, context, model: request.provider === 'local' ? `${LOCAL_MODEL}-batch-v${LOCAL_PROMPT_VERSION}` : config.model, glossary: config.glossary, ...(request.provider === 'google' ? { provider: 'google-v2' } : request.provider === 'local' ? { provider: 'local-hy-mt2' } : {}), ...(request.redo ? { redo: request.redo } : {}) })).digest('hex');
 }
 // Codex receives the original subtitles numbered 1..n in one input and returns one translation per
 // number in one output. Timing never passes through the model: each number maps to exactly one

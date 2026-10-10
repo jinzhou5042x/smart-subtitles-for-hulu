@@ -25,7 +25,7 @@ test('legacy cache is archived and only explicitly bound checkpoints survive res
     assert.equal(restarted.get(request)[0].text, 'corrected');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
-test('complete translations are per target language; Codex upgrades batch results but nothing else overwrites', async () => {
+test('complete translations are per target language and per translator; a translator\'s first complete result is kept', async () => {
   const dir = await mkdtemp(path.join(root, 'data/test-db-'));
   try {
     const db = new SubtitleDatabase(path.join(dir, 'subtitles.sqlite'), {});
@@ -36,17 +36,18 @@ test('complete translations are per target language; Codex upgrades batch result
     assert.equal(db.get(request),null);
     db.put(request,[{sourceIds:['a'],text:'本地'}]);
     assert.equal(db.get(same)[0].sourceIds[0],'b');
-    assert.equal(db.get({...request,provider:'google'})[0].text,'本地');
+    assert.equal(db.get({...request,provider:'google'}),null);
     assert.equal(db.get({...request,target:'ja'}),null);
     assert.equal(db.get({...request,provider:'codex'}),null);
-    assert.equal(db.get({...request,provider:'codex'},{fallback:true})[0].text,'本地');
-    db.put({...request,provider:'google'},[{sourceIds:['a'],text:'谷歌'}]);
-    assert.equal(db.get(request)[0].text,'本地');
-    db.put({...request,provider:'codex'},[{sourceIds:['a'],text:'整集'}]);
-    assert.equal(db.get(request)[0].text,'整集'); assert.equal(db.get({...request,provider:'codex'})[0].text,'整集');
+    db.put({...request,provider:'google'},[{sourceIds:['a'],text:'谷歌'}],{input:5,output:2});
+    assert.equal(db.get(request)[0].text,'本地'); assert.equal(db.get({...request,provider:'google'})[0].text,'谷歌');
+    db.put({...request,provider:'codex'},[{sourceIds:['a'],text:'整集'}],{input:90,output:30});
+    assert.equal(db.get(request)[0].text,'本地'); assert.equal(db.get({...request,provider:'codex'})[0].text,'整集');
+    assert.equal(db.usage(request),null); assert.equal(db.usage({...request,provider:'google'}).input,5); assert.equal(db.usage({...request,provider:'codex'}).input,90);
     db.put({...request,provider:'local'},[{sourceIds:['a'],text:'又一份'}]);
     db.put({...request,provider:'codex'},[{sourceIds:['a'],text:'第二份整集'}]);
-    assert.equal(new SubtitleDatabase(db.file,{model:'different'}).get(request)[0].text,'整集');
+    const reopened = new SubtitleDatabase(db.file,{model:'different'});
+    assert.equal(reopened.get(request)[0].text,'本地'); assert.equal(reopened.get({...request,provider:'codex'})[0].text,'整集');
     assert.equal(db.get({...request,cues:[{...request.cues[0],end:2}]}),null);
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
@@ -92,5 +93,27 @@ test('complete episodes of the 0.9.0 table are migrated', async () => {
     old.close();
     const request = { target: 'zh-CN', provider: 'local', cues: cues.map((c, i) => ({ ...c, id: 'n' + i })) };
     assert.deepEqual(new SubtitleDatabase(file, {}).get(request).map(s => s.sourceIds), [['n0', 'n1']]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('translating again keeps the record in use until the new one is complete, then replaces only that translator\'s', async () => {
+  const dir = await mkdtemp(path.join(root, 'data/test-db-'));
+  try {
+    const db = new SubtitleDatabase(path.join(dir, 'subtitles.sqlite'), { requireBinding: true });
+    const cues = [0, 1].map(i => ({ id: String(i), start: i, end: i + 1, text: 'Source ' + i }));
+    const request = { target: 'zh-CN', provider: 'codex', cues }, redo = { ...request, redo: '11111111-1111-4111-8111-111111111111' };
+    const lines = word => cues.map(c => ({ sourceIds: [c.id], text: `${word} ${c.id}` }));
+    db.put(request, lines('old'), { input: 10, output: 5 });
+    db.put({ ...request, provider: 'google' }, lines('google'));
+    assert.equal(db.get(redo), null); assert.deepEqual(db.partial(redo), []);
+    db.save(redo, lines('new').slice(0, 1), { usage: { input: 3, output: 1 } });
+    assert.deepEqual(db.get(request).map(s => s.text), ['old 0', 'old 1'], 'the draft does not touch the record');
+    assert.deepEqual(db.partial(redo).map(s => s.text), ['new 0']); assert.deepEqual(db.partial(request), []);
+    assert.equal(db.usage(request).input, 10); assert.equal(db.usage(redo, { partial: true }).input, 3);
+    db.put(redo, lines('new'), { input: 7, output: 4 });
+    assert.deepEqual(db.get(request).map(s => s.text), ['new 0', 'new 1']);
+    assert.equal(db.usage(request).input, 7); assert.deepEqual(db.partial(redo), []);
+    assert.deepEqual(db.get({ ...request, provider: 'google' }).map(s => s.text), ['google 0', 'google 1']);
+    assert.equal(db.with(sql => sql.prepare('SELECT COUNT(*) n FROM translations').get().n), 2);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

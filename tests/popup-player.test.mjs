@@ -24,7 +24,7 @@ test('a refreshing or disconnected player is not reported as an unrelated page',
     assert.equal(playerState({ url }, loading, true).status, '');
     assert.equal(playerState({ url }, failure, true), failure);
   }
-  assert.equal(playerState({ url: 'https://example.com' }, null, true).status, 'Open a Hulu or Disney+ video');
+  assert.equal(playerState({ url: 'https://example.com' }, null, true).status, 'Open a video on Hulu or Disney+');
   assert.equal(playerState(null, null, false).status, 'Bilingual subtitles are off');
 });
 

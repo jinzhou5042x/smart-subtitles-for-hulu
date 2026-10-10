@@ -1,8 +1,8 @@
-# Smart Subtitles for Disney+ & Hulu
+# Smart Subtitles
 
 > Unofficial tool, not affiliated with, endorsed by or sponsored by Hulu. "Hulu" is a trademark of its owner and is used only to describe compatibility. Personal, non-commercial use; provided as is, without warranty. See the [Terms of Use and Privacy Policy](extension/legal.html).
 
-A local Windows service plus a Chrome extension that shows bilingual subtitles over native Hulu video: the original English subtitles and an AI translation into another language. Translation runs through the signed-in Codex, Google Cloud Translation, or a local Hy-MT2 model on the GPU.
+A local Windows or macOS service plus a Chrome extension that shows bilingual subtitles over native Hulu video: the original English subtitles and an AI translation into another language. Translation runs through the signed-in Codex, Google Cloud Translation, or a local Hy-MT2 model on the GPU.
 
 ## Usage
 
@@ -81,16 +81,29 @@ Restart the service after changing configuration; double-click **Stop Subtitles.
 
 | Part | Files | Role |
 | --- | --- | --- |
-| Site profile | `extension/site.js` | Everything that depends on Hulu's web player: episode pages, the episode `<video>`, ad breaks, the timeline. Change only this file when Hulu changes its player or another site is added. |
+| Player layer | `extension/site.js`, `extension/players/*.js` | One contract (documented at the top of `site.js`) and one adapter per streaming service: playback pages, the title's `<video>`, ad breaks, the title's length and the subtitle clock. Nothing else looks at a service's page. |
 | Subtitle discovery | `extension/capture.js` (page world) | Reads subtitle files the player loads or lists: playback JSON, HLS (segmented WebVTT, `X-TIMESTAMP-MAP`), DASH text tracks, `<track>`. |
 | Parsing | `extension/core.js`, `extension/ttml.js` | VTT/SRT/TTML parsing, timing, picture geometry. |
-| Overlay and episode flow | `extension/content.js` | Picks the complete English file, requests the translation, draws the two lines, reports status to the popup. |
+| Subtitle tracks | `extension/tracks.js` | Turns captured files into tracks and chooses the title's English one: declared by the player first, and only if it covers the title. No DOM. |
+| Translation session | `extension/session.js` | Asks the service for one track's translation, follows its progress, holds the lines; retry and "translate again". No DOM. |
+| Overlay | `extension/overlay.js` | The two lines over the picture: fitting, dragging, position. Knows nothing about players or translation. |
+| Page script | `extension/content.js` | Connects the layers above, reports status to the popup and produces the diagnostics snapshot. |
 | Popup | `extension/popup.*` | Settings, status, progress and token usage; light and dark. |
 | Background | `extension/background.js` | Settings storage, pairing, the only code that talks to the service. |
 | Service | `service/server.mjs`, `episodes.mjs`, `jobs.mjs`, `database.mjs` | HTTP API on 127.0.0.1, per-episode state, up to `maxAgents` (16) translations at once, SQLite. |
 | Translators | `service/codex.mjs`, `google.mjs`, `local*.mjs`, `translation.mjs` | Codex app-server threads (token usage included), Google, local model; prompts and validation. |
 
 Ad breaks: the overlay hides while a detected ad is playing. After the break, the player profile discards the old clock offset and waits for fresh content timing before showing subtitles again. The overlay hides during every ad break (pre-roll and mid-roll, also while an ad is paused) and the popup waits for the episode to start before it reports that no subtitles were found.
+
+## Adding a streaming service
+
+1. Add its hosts to `extension/sites.js` (`identify`, `names`, `matches`) and to both `content_scripts` blocks and `host_permissions` in `extension/manifest.json`.
+2. Write `extension/players/<service>.js`: an object passed to `SubtitlePlayers.register` that overrides only what differs from an ordinary HTML5 video. Start from `players/hulu.js`. Every fact about the player must come from a measurement in live playback, noted with its date.
+3. List the file in the manifest and in `PAGE_SCRIPTS` (`extension/popup-player.js`), after `site.js`.
+4. Add its playback URL to `pages` in `tests/players.test.mjs`; the contract test then runs against it.
+5. If its subtitles are not found, extend the discovery rules in `extension/capture.js`.
+
+`npm run check:browser` runs all page scripts in a real Chrome against the local test clip. "Copy diagnostics" in the popup gives what the page script sees on a real player: the clock's state, every captured track with the reason it was or was not chosen, and the translation's state.
 
 ## Releasing
 
@@ -113,7 +126,7 @@ User research (complaints about dual-subtitle tools, competitors, Hulu's web pla
 ## Legal
 
 - **Terms of Use, Privacy Policy and third-party notices:** `extension/legal.html`, opened from the popup ("Terms & Privacy"). The same file can be hosted as the privacy policy URL required by the Chrome Web Store.
-- **Branding:** the product is named "Smart Subtitles for Disney+ & Hulu" and uses its own logo in a darker green than Hulu's brand colour, with an "unofficial" notice, so it is not mistaken for an official Hulu product.
+- **Branding:** the product is named "Smart Subtitles", without the name of any streaming service (more are planned; the supported ones are listed in `extension/sites.js`), and uses its own logo in a darker green than Hulu's brand colour, with an "unofficial" notice, so it is not mistaken for an official Hulu product.
 - **Third-party software:** llama.cpp (MIT, © The ggml authors) and the Hy-MT2-7B model (Apache-2.0, © Tencent); their license files are in `runtime/llama.cpp` and `models/Hy-MT2-7B`.
 - These texts reduce risk but are not legal advice; have them reviewed before a wide public release.
 
@@ -142,3 +155,12 @@ Google key setup links an existing local UTF-8 file through one Explorer file pi
 Native key picker lifecycle: the companion owns one operation and its child process. The Windows helper has a hidden message-pump host, not a second visible window, and reports the actual dialog HWND every 400 ms. States distinguish starting, open, saving and terminal completion. Duplicate starts rejoin/focus the existing operation; focus restores minimized dialogs with `ShowWindow(SW_RESTORE)` and requests foreground activation. EOF/parent exit, user cancel, process errors, a vanished window and stalled heartbeat all release the operation. The popup reads the companion's authoritative state and exposes one file-selection link; repeated clicks focus the current dialog. Cancel belongs to the native dialog. Browser session state is a polling pointer, not proof that a window exists. Keys never travel through the helper command line or status channel.
 
 The picker is a cached C# GUI executable compiled with the Windows .NET Framework compiler. It uses the modern IFileDialog API with the browser HWND as owner, a single Alt+Tab-accessible dialog, and explicit UTF-8 pipe streams. It does not launch PowerShell or a console window. Only a visible, nonempty #32770 dialog in the owned process counts as open. Page centering accounts for Chrome zoom; an inaccessible page falls back to browser centering.
+
+## macOS development and release
+
+Use Node.js 22.13+ (SQLite support), Chrome 127+, and macOS 13+. `Start Subtitles.command` builds the extension and starts an authenticated background service; `Stop Subtitles.command` uses authenticated shutdown. Finder launchers search bundled Node, Homebrew, and the usual PATH. `Set Up Codex.command` records an existing executable or installs a private official CLI copy.
+
+The Google picker uses an AppKit NSOpenPanel helper with focus, cancellation, heartbeat and parent-exit handling. Development compiles it with swiftc; releases bundle it. Build on macOS with `npm run release -- darwin-arm64` or `npm run release -- darwin-x64`; both bundle checksum-verified official Node and exclude local configuration, caches and keys. Releases are unsigned and not notarized. CI tests Linux, Windows, Apple Silicon and Intel macOS.
+
+Optional local translation accepts `localServerPath`, or uses `runtime/llama.cpp/llama-server` on Mac. Install a compatible llama.cpp Metal runtime and the documented model separately; local model playback/performance on Mac has not been verified.
+

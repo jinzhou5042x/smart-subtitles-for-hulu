@@ -9,4 +9,4 @@ for (const args of [['--version'], ['login', 'status']]) {
   catch (e) { console.error(`Codex unavailable: ${e.message}`); process.exitCode = 1; }
 }
 try { const r = await fetch(`http://127.0.0.1:${config.port}/status`, { headers: { Authorization: `Bearer ${config.pairingToken}` }, signal: AbortSignal.timeout(3000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); console.log(await r.json()); }
-catch { console.log('Local service is not running or needs restarting. Run "Start Subtitles.cmd"'); }
+catch { console.log('Local service is not running or needs restarting. Run the Start Subtitles launcher'); }

@@ -5,7 +5,10 @@ on:
   pull_request:
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -13,4 +16,5 @@ jobs:
           node-version: 22
       - run: npm test
       - name: Check that the extension scripts parse
+        shell: bash
         run: for f in extension/*.js; do node --check "$f" 2>/dev/null || node --input-type=module --check < "$f"; done

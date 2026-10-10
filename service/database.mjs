@@ -2,8 +2,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { validateTranslation } from './translation.mjs';
 
-// Prefer a Codex translation when more than one provider has a result.
-export const providerRank = provider => provider === 'codex' || !provider ? 2 : 1;
 export function subtitleHash(cues) {
   return createHash('sha256').update(JSON.stringify(cues.map(c => [c.start, c.end, c.text.normalize('NFC').replace(/\s+/g, ' ').trim()]))).digest('hex');
 }
@@ -12,6 +10,13 @@ export const USAGE = { input: 'input_tokens', cachedInput: 'cached_input_tokens'
 export const addUsage = (a, b) => (a || b) && Object.fromEntries(Object.keys(USAGE).map(k => [k, (a?.[k] || 0) + (b?.[k] || 0)]));
 const usageOf = row => row && Object.values(USAGE).some(c => row[c]) ? Object.fromEntries(Object.entries(USAGE).map(([k, c]) => [k, row[c]])) : null;
 const USAGE_COLUMNS = Object.values(USAGE).join(', ');
+
+// A translator's record of an episode, and the draft of translating it again. The draft
+// (`request.redo`) is stored beside the record under its own name and takes the record's place
+// only when it is complete, so the subtitles in use survive a redo that fails or is abandoned.
+const REDO = '#redo';
+const recordOf = request => request.provider || 'codex';
+const storeOf = request => recordOf(request) + (request.redo ? REDO : '');
 
 // Identifies an episode translation in memory: the normalized subtitles (timing and text) and the target language.
 export const episodeHash = request => createHash('sha256').update(JSON.stringify([subtitleHash(request.cues), request.target])).digest('hex');
@@ -70,25 +75,21 @@ export class SubtitleDatabase {
     const segments = rows.map(r => ({ sourceIds: Array.from({ length: r.span }, (_, k) => request.cues[r.idx + k]?.id), text: r.text }));
     return validateTranslation({ segments }, request.cues.slice(0, count));
   }
-  // The complete translation that `get` returns: the highest-ranked one, and among equals the first completed.
-  best(db, hash, target) {
-    const rows = db.prepare(`SELECT provider, ${USAGE_COLUMNS} FROM translations WHERE hash=? AND target=? AND complete=1 ORDER BY updated_at`).all(hash, target);
-    return rows.sort((a, b) => providerRank(b.provider) - providerRank(a.provider))[0];
-  }
-  // Returns a complete translation when it is at least as good as the requested provider.
-  // `fallback` also accepts a lower-ranked one.
-  get(request, { fallback = false } = {}) {
-    const hash = subtitleHash(request.cues);
+  // The requested provider's own complete translation. Each translator has its own record and
+  // progress; another translator's result is never returned in its place.
+  // A redo has no complete translation until it replaces the record.
+  get(request) {
+    if (request.redo) return null;
+    const hash = subtitleHash(request.cues), provider = recordOf(request);
     return this.with(db => {
-      const best = this.best(db, hash, request.target);
-      if (!best || (!fallback && providerRank(best.provider) < providerRank(request.provider))) return null;
-      try { return this.read(db, hash, request, best.provider, request.cues.length); }
-      catch { this.forget(db, hash, request.target, best.provider); return null; }
+      if (!db.prepare('SELECT 1 FROM translations WHERE hash=? AND target=? AND provider=? AND complete=1').get(hash, request.target, provider)) return null;
+      try { return this.read(db, hash, request, provider, request.cues.length); }
+      catch { this.forget(db, hash, request.target, provider); return null; }
     });
   }
   // The accepted prefix of an unfinished translation by the requested provider.
   partial(request) {
-    const hash = subtitleHash(request.cues), provider = request.provider || 'codex';
+    const hash = subtitleHash(request.cues), provider = storeOf(request);
     return this.with(db => {
       const row = db.prepare('SELECT done FROM translations WHERE hash=? AND target=? AND provider=? AND complete=0').get(hash, request.target, provider);
       if (!row?.done) return [];
@@ -96,13 +97,11 @@ export class SubtitleDatabase {
       catch { this.forget(db, hash, request.target, provider); return []; }
     });
   }
-  // Tokens used by the complete translation that `get` returns, or (`partial`) by the requested
-  // provider's unfinished one; null when none were recorded.
+  // Tokens used by the requested provider's complete translation, or (`partial`) by its
+  // unfinished one; null when none were recorded.
   usage(request, { partial = false } = {}) {
     const hash = subtitleHash(request.cues);
-    return this.with(db => usageOf(partial
-      ? db.prepare(`SELECT ${USAGE_COLUMNS} FROM translations WHERE hash=? AND target=? AND provider=? AND complete=0`).get(hash, request.target, request.provider || 'codex')
-      : this.best(db, hash, request.target)));
+    return this.with(db => usageOf(db.prepare(`SELECT ${USAGE_COLUMNS} FROM translations WHERE hash=? AND target=? AND provider=? AND complete=?`).get(hash, request.target, partial ? storeOf(request) : recordOf(request), partial ? 0 : 1)));
   }
   forget(db, hash, target, provider) {
     db.prepare('DELETE FROM lines WHERE hash=? AND target=? AND provider=?').run(hash, target, provider);
@@ -116,7 +115,7 @@ export class SubtitleDatabase {
     const validated = count ? validateTranslation({ segments }, cues) : [];
     if (complete && count !== request.cues.length) throw new Error('Incomplete translation');
     const index = new Map(request.cues.map((c, i) => [c.id, i]));
-    const hash = subtitleHash(request.cues), provider = request.provider || 'codex', now = new Date().toISOString();
+    const hash = subtitleHash(request.cues), provider = storeOf(request), now = new Date().toISOString();
     this.with(db => {
       db.exec('BEGIN IMMEDIATE');
       try {
@@ -138,6 +137,10 @@ export class SubtitleDatabase {
         for (const l of lines) if (!append || l.idx >= from) line.run(hash, request.target, provider, l.idx, l.span, l.text);
         db.prepare(`INSERT OR REPLACE INTO translations(hash, target, provider, done, complete, updated_at, ${USAGE_COLUMNS}) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(hash, request.target, provider, count, complete ? 1 : 0, now, ...tokens);
         if (this.config.requireBinding) db.prepare('UPDATE translations SET binding_version=1 WHERE hash=? AND target=? AND provider=?').run(hash, request.target, provider);
+        if (complete && request.redo) {
+          this.forget(db, hash, request.target, recordOf(request));
+          for (const table of ['lines', 'translations']) db.prepare(`UPDATE ${table} SET provider=? WHERE hash=? AND target=? AND provider=?`).run(recordOf(request), hash, request.target, provider);
+        }
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     });

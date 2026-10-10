@@ -3,13 +3,17 @@
 //   node scripts/configure-codex.mjs path <codex.exe> -> an existing Codex installation
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { loadConfig, root } from '../service/config.mjs';
 
 await loadConfig(); // creates config/local.json and the pairing code if needed
 const file = path.join(root, 'config/local.json');
 const config = JSON.parse(await readFile(file, 'utf8'));
 const [mode, executable] = process.argv.slice(2);
-if (mode === 'bundled') config.codexPath = ['node/node.exe', 'codex/node_modules/@openai/codex/bin/codex.js'];
+if (mode === 'bundled') {
+  const bundledNode = process.platform === 'win32' ? 'node/node.exe' : 'node/bin/node';
+  config.codexPath = [existsSync(path.join(root, bundledNode)) ? bundledNode : process.execPath, 'codex/node_modules/@openai/codex/bin/codex.js'];
+}
 else if (mode === 'path' && executable) config.codexPath = executable;
 else { console.error('Usage: configure-codex.mjs bundled | path <codex.exe>'); process.exit(1); }
 await writeFile(file, JSON.stringify(config, null, 2));

@@ -19,7 +19,7 @@ export class JobQueue {
     const job = { id: randomUUID(), key, request, status: 'queued', created: Date.now(), controller: new AbortController() };
     this.jobs.set(job.id, job); this.drain(); return this.public(job);
   }
-  public(j) { return j && { id: j.id, status: j.status, segments: j.segments, error: j.error, elapsedMs: j.elapsedMs, progress: j.progress }; }
+  public(j) { return j && { id: j.id, status: j.status, segments: j.segments, error: j.error, needsUser: j.needsUser, elapsedMs: j.elapsedMs, progress: j.progress }; }
   get(id) { return this.public(this.jobs.get(id)); }
   cancel(client, epoch) {
     for (const j of this.jobs.values()) if (j.request.client === client && (!epoch || j.request.epoch === epoch) && ['queued', 'running'].includes(j.status)) {
@@ -39,7 +39,7 @@ export class JobQueue {
       const segments = await this.translator.translate(job.request, job.controller.signal, progress => { job.progress = progress; });
       if (job.controller.signal.aborted) return;
       job.segments = segments; job.status = 'done'; job.elapsedMs = Date.now() - started;
-    } catch (e) { if (job.status !== 'cancelled') { job.status = 'error'; job.error = e.message; } }
+    } catch (e) { if (job.status !== 'cancelled') { job.status = 'error'; job.error = e.message; job.needsUser = !!e.needsUser; } }
     finally { this.running--; this.drain(); }
   }
 }

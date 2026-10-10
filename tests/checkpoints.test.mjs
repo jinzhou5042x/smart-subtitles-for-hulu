@@ -106,3 +106,54 @@ test('a full-looking stream cannot save the final window before successful turn 
   await assert.rejects(translateCheckpoints(request,{translateEpisode:async(r,s,p)=>{p({partialSegments:segments});throw new Error('failed turn');}},undefined,()=>{},s=>writes.push(s.length)),/failed turn/);
   assert.deepEqual(writes,[2,4]);
 });
+
+// Seen on 2026-10-10: one line of 978 came back with a source that was not an exact copy and
+// the whole episode stopped at "Translation paused" until Retry was pressed; the same request
+// then ran without a mismatch twice.
+test('a line the model wrote wrongly is asked for again from the last saved window, a few times, by itself', async () => {
+  const slip = () => Object.assign(new Error('Subtitle 60–62 does not match its original source'), { modelOutput: true });
+  const starts = []; let calls = 0;
+  const translator = { translateEpisode: async (r, signal, progress) => {
+    calls++; starts.push(r.accepted.length);
+    if (calls === 1) { progress({ partialSegments: segments.slice(0, 3) }); throw slip(); }
+    progress({ partialSegments: segments }); return segments;
+  } };
+  const phases = [], writes = [];
+  const done = await translateCheckpoints(request, translator, undefined, p => phases.push(p.phase), s => writes.push(s.length));
+  assert.equal(done.length, 5); assert.deepEqual(starts, [0, 2], 'the second attempt starts after the saved window, not from the start');
+  assert.ok(phases.includes('retrying')); assert.deepEqual(writes, [2, 4, 5], 'nothing is saved twice');
+  // A window that fails twice with the whole episode is translated alone, then the episode goes on.
+  const asked = [];
+  const picky = { translateEpisode: async (r, signal, progress) => {
+    asked.push([r.cues.length, r.accepted.length]);
+    if (r.cues.length < 5) return r.cues.map(c => ({ sourceIds: [c.id], text: `alone ${c.id}` }));
+    if (r.accepted.length === 0) { progress({ partialSegments: segments.slice(0, 2) }); throw slip(); }
+    if (r.accepted.length === 2) throw slip();
+    const out = [...r.accepted, ...segments.slice(r.accepted.length)];
+    progress({ partialSegments: out }); return out;
+  } };
+  const saves = [];
+  const repaired = await translateCheckpoints(request, picky, undefined, () => {}, s => saves.push(s.length));
+  assert.deepEqual(asked, [[5, 0], [5, 2], [2, 0], [5, 4]], 'the episode, the episode again, the stuck minute alone, then the rest');
+  assert.deepEqual(repaired.map(s => s.text), ['译 0', '译 1', 'alone 2', 'alone 3', '译 4']); assert.deepEqual(saves, [2, 4, 5]);
+  // Only a window that also fails alone, four times, is reported, and then as the viewer's to see.
+  let stubborn = 0;
+  await assert.rejects(translateCheckpoints(request, { translateEpisode: async () => { stubborn++; throw slip(); } }), error => /does not match/.test(error.message) && error.needsUser === true);
+  assert.equal(stubborn, 6);
+  // What is not the model's writing is never retried here.
+  let other = 0;
+  await assert.rejects(translateCheckpoints(request, { translateEpisode: async () => { other++; throw new Error('usage limit reached'); } }), /usage limit/);
+  assert.equal(other, 1);
+});
+
+test('a source that is not an exact copy is rejected, marked as the model\'s writing, and described without quoting it', () => {
+  const two = { cues: [{ id: 'a', start: 507.174, end: 510.427, text: "I've been spending a lot\nof time with my kids," }, { id: 'b', start: 510.427, end: 512.971, text: 'and I just, like, let life unfold.' }], target: 'zh-CN' };
+  const answer = source => JSON.stringify({ translations: { [timestampKey(two.cues[0])]: { source, translation: '我一直花很多时间陪孩子，' }, [timestampKey(two.cues[1])]: { source: two.cues[1].text, translation: '就这样顺其自然。' } } });
+  const fed = source => { try { keyedOutput(two).feed(answer(source)); return null; } catch (error) { return error; } };
+  assert.equal(fed(two.cues[0].text), null);
+  for (const [source, how] of [["I've been spending a lot of time with my kids,", 'only spacing or line breaks differ'], ["I’ve been spending a lot\nof time with my kids,", 'only letter case or quotation marks differ'], ["I've been spending a lot\nof time with my kids, and I just, like, let life unfold.", 'text was added or left out'], ['Something else entirely.', 'different text']]) {
+    const error = fed(source);
+    assert.equal(error.modelOutput, true); assert.ok(error.message.endsWith(`(${how})`), error.message);
+    assert.ok(!/kids|spending/.test(error.message), 'no dialogue in the message');
+  }
+});

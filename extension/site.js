@@ -1,10 +1,32 @@
-// Player profiles. Routing is deliberately limited to playback pages, not preview carousels.
-// capture.js (subtitle discovery) is separate because it runs in the page's own JavaScript world.
+// The player layer: one contract, one adapter per streaming service.
+//
+// Everything above this layer (subtitle tracks, translation, overlay, popup) asks the same
+// questions of every service and never looks at a service's page itself:
+//
+//   id, name            the service, as in sites.js
+//   isWatchPage()       is this a playback page (not a preview or browse page)
+//   episodeKey()        identifies the title on screen; changes when another one starts
+//   contentVideo()      the title's own <video>, or undefined while there is none
+//   overlayParent()     where the overlay must live to stay visible (full screen)
+//   adBreak()           is an ad on screen now
+//   titleSeconds(video, track)   the title's length, to judge whether a track covers it; 0 if unknown
+//   timelineSeconds()   the player's own timeline length, or null
+//   subtitleTime(video, origin)  seconds on the subtitle track's timeline, or NaN: show nothing
+//   awaitingClock(video)         only the viewer can help the clock now (show the prompt)
+//   clockPolicy, clockState(video)   which clock this is and what it currently believes
+//
+// An adapter is a plain object passed to SubtitlePlayers.register; whatever it leaves out comes
+// from `html5`, the behaviour of an ordinary page with one <video> whose currentTime is the
+// title's time. A new service is one file in players/ plus its entry in sites.js and the manifest.
+// What an adapter believes about its player must come from a measurement, with its date beside it.
+//
+// Everything here lives in the page and is rebuilt from nothing on a reload: no clock, offset
+// or sample is stored anywhere.
 (function (scope) {
-  const demo = () => location.hostname === '127.0.0.1';
-  const disney = () => globalThis.SubtitleSites.identify(location.href) === 'disney';
-  const clocks = new WeakMap();
-  let adState = { page: '', active: false, generation: 0, maximum: null };
+  const shown = element => {
+    const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0.05;
+  };
   function deepFind(root, selector) {
     if (!root) return null;
     const found = root.querySelector(selector); if (found) return found;
@@ -14,121 +36,52 @@
     }
     return null;
   }
-  function clockSample() {
-    const slider = disney()
-      ? deepFind(document.querySelector('main-app-controls-overlay')?.shadowRoot, '[data-qa="progress-bar.seekableRange"]')
-      : document.querySelector('.Timeline__slider[aria-label="Timeline"]');
-    if (!slider) return null;
-    const rawNow = slider.getAttribute('aria-valuenow'), rawMax = slider.getAttribute('aria-valuemax');
-    if (rawNow == null || rawMax == null || !rawNow.trim() || !rawMax.trim()) return null;
-    const now = Number(rawNow), maximum = Number(rawMax);
-    const width = slider.querySelector?.('[data-qa="progress-bar.progress"]')?.style.width;
-    const percent = typeof width === 'string' && /^\d+(?:\.\d+)?%$/.test(width.trim()) ? parseFloat(width) : NaN;
-    if (!Number.isFinite(now) || !Number.isFinite(maximum) || !(maximum > 0) || now < 0 || now > maximum) return null;
-    const visualTime = percent * maximum / 100;
-    // CSS width can freeze or animate independently of the accessible timestamp.
-    const content = Number.isFinite(percent) && percent >= 0 && percent <= 100 && Math.abs(visualTime - now) <= 1.5 ? visualTime : now;
-    return { now, maximum, content, signature: `${rawNow}|${rawMax}|${width || ''}` };
-  }
-  const pauseText = () => disney() ? document.querySelector('.text-to-speech-status')?.textContent || '' : '';
-  function detectAd() {
-    if ([...document.querySelectorAll('[data-ad-playing="true"], .ad-showing')].some(shown)) return true;
-    const ad = document.querySelector('#ad-video-player');
-    return !!ad && !ad.ended && ad.readyState >= 2 && (!ad.paused || shown(ad));
-  }
-  function observeAd() {
-    if (adState.page !== location.pathname) adState = { page: location.pathname, active: false, generation: 0, maximum: null };
-    const active = detectAd();
-    if (active || active !== adState.active) {
-      // Controls can still contain ad/pre-ad values when the ad flag disappears.
-      adState.blockedSample = clockSample()?.signature;
-      adState.blockedPause = pauseText();
+  const largestVideo = () => [...document.querySelectorAll('video')].filter(v => v.id !== 'ad-video-player' && shown(v) && v.getBoundingClientRect().width > 200).sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+
+  // Ad breaks, per page. `generation` counts every start and end of a break. `leftover` is what
+  // `snapshot` returned during the break and at its end, for clocks whose controls can still
+  // hold ad or pre-ad values when the ad flag disappears. `maximum` is free for the adapter.
+  function adWatcher(snapshot = () => ({})) {
+    const none = page => ({ page, active: false, generation: 0, maximum: null, leftover: {} });
+    let ads = none('');
+    function detect() {
+      if ([...document.querySelectorAll('[data-ad-playing="true"], .ad-showing')].some(shown)) return true;
+      const ad = document.querySelector('#ad-video-player');
+      return !!ad && !ad.ended && ad.readyState >= 2 && (!ad.paused || shown(ad));
     }
-    if (active !== adState.active) adState.generation++;
-    adState.active = active;
-    return active;
-  }
-  function revealControls(video, clock) {
-    const now = Date.now();
-    if (clock.attempts >= 4 || now < (clock.nextAttempt || 0)) return;
-    clock.attempts++; clock.nextAttempt = now + 1000;
-    if (typeof MouseEvent !== 'function' || !video.dispatchEvent) return;
-    const rect = video.getBoundingClientRect();
-    video.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
-  }
-  function contentTime(video, origin) {
-    const activeAd = observeAd();
-    // Hulu's dedicated content element already carries subtitle time. Its integer
-    // UI timeline is less precise and must never introduce a synthetic offset.
-    if (!disney()) return activeAd || video.seeking || !Number.isFinite(video.currentTime) ? NaN : video.currentTime;
-    const key = location.pathname + '|' + (video.currentSrc || video.src || '');
-    let clock = clocks.get(video);
-    if (!clock || clock.key !== key) {
-      const replacedSource = !!clock;
-      clock = { key, offset: disney() ? origin : 0, calibrated: false, pausedText: '', generation: adState.generation, waiting: adState.generation > 0, attempts: 0 };
-      if (replacedSource) { clock.waiting = true; clock.ignoredSample = clockSample()?.signature; }
-      clocks.set(video, clock);
-    }
-    if (clock.generation !== adState.generation) {
-      clock.generation = adState.generation; clock.waiting = true;
-      clock.calibrated = false; clock.attempts = 0; clock.nextAttempt = 0;
-    }
-    if (activeAd) return NaN;
-    if (clock.waiting) revealControls(video, clock);
-    if (video.seeking) return NaN;
-    const text = pauseText(), paused = /^Paused at (\d+)\.$/.exec(text);
-    let pauseAccepted = false;
-    if (video.paused && paused && text !== clock.pausedText && (!clock.waiting || text !== adState.blockedPause)) {
-      clock.offset = video.currentTime - Number(paused[1]) / 1000;
-      clock.calibrated = true; clock.waiting = false; clock.pausedText = text; pauseAccepted = true;
-      // Ignore the old slider until it advances after this precise pause sample.
-      clock.ignoredSample = clockSample()?.signature;
-    }
-    const sample = clockSample();
-    // A different duration may be an unrecognized ad timeline. Never adopt it.
-    if (sample && adState.maximum && Math.abs(sample.maximum - adState.maximum) > 2) {
-      clock.waiting = true; clock.calibrated = false; return NaN;
-    }
-    const fresh = sample && sample.signature !== clock.lastSample && !pauseAccepted && sample.signature !== clock.ignoredSample && (!clock.waiting || (sample.signature !== adState.blockedSample &&
-      (!adState.maximum || Math.abs(sample.maximum - adState.maximum) <= 2)));
-    if (fresh) { adState.maximum = sample.maximum; clock.lastSample = sample.signature; }
-    if (fresh && (!clock.calibrated || Math.abs(video.currentTime - clock.offset - sample.content) > 1.5)) {
-      clock.offset = video.currentTime - sample.content; clock.calibrated = true; clock.waiting = false;
-      adState.maximum = sample.maximum;
-    }
-    if (clock.waiting || (disney() && /^hivePlayer/.test(video.id || '') && !clock.calibrated)) return NaN;
-    return video.currentTime - clock.offset;
-  }
-  const shown = element => {
-    const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
-    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0.05;
-  };
-  scope.SubtitleSite = {
-    get name() { return disney() ? 'Disney+' : 'Hulu'; },
-    get clockPolicy() { return disney() ? 'disney-controls-v2' : 'hulu-media-v1'; },
-    // Episodes play on /watch/<id>. Autoplay of the next episode moves to a new path, so the path
-    // identifies the episode whose subtitles are on screen.
-    isWatchPage: () => demo() || (disney() ? /^\/(?:[a-z]{2}(?:-[a-z]{2,4})?\/)?(?:play|video)\/[^/]+\/?$/i.test(location.pathname) : location.pathname.startsWith('/watch/')),
-    episodeKey: () => location.pathname,
-    // The episode's own player. Ads play in a separate element, so the episode's currentTime is
-    // the subtitles' time even around ad breaks.
-    contentVideo() {
-      if (!scope.SubtitleSite.isWatchPage()) return undefined;
-      if (!disney()) {
-        const content = document.querySelector('#content-video-player');
-        if (content) return shown(content) ? content : undefined;
-        // During Hulu player replacement, do not mistake the intro/ad video for content.
-        if (!demo()) return undefined;
+    return {
+      get state() { return ads; },
+      observe() {
+        if (ads.page !== location.pathname) ads = none(location.pathname);
+        const active = detect();
+        if (active || active !== ads.active) ads.leftover = snapshot();
+        if (active !== ads.active) ads.generation++;
+        ads.active = active;
+        return active;
       }
-      return [...document.querySelectorAll('video')].filter(v => v.id !== 'ad-video-player' && shown(v) && v.getBoundingClientRect().width > 200).sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
-    },
-    // A pre-roll or mid-roll ad break. The episode stands still meanwhile and its subtitles stay
-    // hidden; a paused ad that is still on screen counts too, so subtitles never cover an ad.
-    adBreak: observeAd,
-    // The player's timeline length in seconds; some titles report video.duration as Infinity.
-    timelineSeconds: () => disney() ? null : document.querySelector('.Timeline__slider[aria-label="Timeline"]')?.getAttribute('aria-valuemax'),
-    subtitleTime: (video, origin = 0) => contentTime(video, origin),
-    // Where the overlay lives so it stays visible in full screen.
+    };
+  }
+
+  const html5 = {
+    id: 'demo', name: 'Video', clockPolicy: 'media-v1',
+    isWatchPage: () => true,
+    episodeKey: () => location.pathname,
+    contentVideo: largestVideo,
     overlayParent: () => document.fullscreenElement || document.body,
+    adBreak: () => false,
+    timelineSeconds: () => null,
+    titleSeconds(video) { return globalThis.SubtitleCore.mediaDuration(video?.duration, this.timelineSeconds()); },
+    // The element's own time is the title's time; there is nothing to calibrate or restore.
+    subtitleTime(video) { return this.adBreak() || video.seeking || !Number.isFinite(video.currentTime) ? NaN : video.currentTime; },
+    awaitingClock: () => false,
+    clockState: video => ({ mediaTime: video?.currentTime }),
   };
+  const adapters = [];
+  const current = () => adapters.find(a => globalThis.SubtitleSites.identify(location.href) === a.id) || html5;
+  const site = { get name() { return current().name; }, get id() { return current().id; }, get clockPolicy() { return current().clockPolicy; } };
+  for (const method of ['isWatchPage', 'episodeKey', 'contentVideo', 'overlayParent', 'adBreak', 'timelineSeconds', 'titleSeconds', 'subtitleTime', 'awaitingClock', 'clockState']) site[method] = (...args) => current()[method](...args);
+  // Only playback pages have a title on screen.
+  const contentVideo = site.contentVideo; site.contentVideo = () => site.isWatchPage() ? contentVideo() : undefined;
+  scope.SubtitlePlayers = { register(adapter) { adapters.push(Object.setPrototypeOf(adapter, html5)); }, html5, shown, deepFind, largestVideo, adWatcher };
+  scope.SubtitleSite = site;
 })(globalThis);

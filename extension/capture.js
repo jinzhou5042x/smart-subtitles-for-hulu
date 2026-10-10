@@ -32,10 +32,11 @@
   const subtitleKey = key => /caption|subtitle|transcript|timedtext|texttrack/i.test(key);
   const otherFile = url => /\.(woff2?|ttf|otf|png|jpe?g|gif|webp|svg|css|js|json|mp4|m4s|m4a|ts|aac|mp3)(?:[?#]|$)/i.test(url);
   function emit(data) { if (!stopped && data.page === location.pathname) window.postMessage(data, location.origin); }
-  function publish(url, text, page, language = '', duration = 0, timeOrigin = 0) {
+  // `declared`: the player's own data named this file as a subtitle track.
+  function publish(url, text, page, language = '', duration = 0, timeOrigin = 0, declared = false) {
     if (typeof text !== 'string' || text.length > 5_000_000 || page !== location.pathname) return;
     let name; try { name = new URL(url, location.href).pathname.split('/').at(-1); } catch { name = 'captions'; }
-    const data = { type: 'hulu-context-captured', page, name, text, language, duration, timeOrigin };
+    const data = { type: 'hulu-context-captured', page, name, text, language, duration, timeOrigin, declared };
     buffer.push(data); if (buffer.length > 12) buffer.shift(); emit(data);
     report(page, { received: 1 });
   }
@@ -66,11 +67,11 @@
     }
   }
   // `listed`: the URL was named as a subtitle file by playback metadata or a manifest.
-  async function fetchSubtitle(url, page, language, listed = false) {
+  async function fetchSubtitle(url, page, language, listed = false, declared = listed) {
     const parsed = remote(url); if (!parsed) return;
     if (!listed && !subtitleURL(parsed.href)) return;
     const key = page + '|' + parsed.href;
-    remember(discovered, key, { url: parsed.href, page, language, listed });
+    remember(discovered, key, { url: parsed.href, page, language, listed, declared });
     if (stopped || requested.has(key) || Date.now() < (failures.get(key)?.after || 0)) return; requested.add(key);
     report(page, { found: 1, pending: 1 });
     const controller = new AbortController(); downloads.add(controller);
@@ -79,8 +80,8 @@
       if (!response.ok) throw new Error('Could not read the subtitle file');
       const text = await response.text();
       // A listed URL may also be an HLS playlist of subtitle segments.
-      if (/^#EXTM3U/.test(text)) await segments(parsed.href, text, page, language, controller.signal);
-      else publish(parsed.href, text, page, language);
+      if (/^#EXTM3U/.test(text)) await segments(parsed.href, text, page, language, controller.signal, declared);
+      else publish(parsed.href, text, page, language, 0, 0, declared);
       failures.delete(key);
     } catch {
       const count = (failures.get(key)?.count || 0) + 1;
@@ -99,7 +100,7 @@
     const map = /X-TIMESTAMP-MAP=([^\n]*)/.exec(text)?.[1]; if (!map) return 0;
     return Number(/MPEGTS:(\d+)/.exec(map)?.[1] || 0) / 90000 - clock(/LOCAL:([\d:.]+)/.exec(map)?.[1] || '0');
   }
-  async function segments(url, list, page, language, signal) {
+  async function segments(url, list, page, language, signal, declared) {
     // A live/sliding window is not a complete episode; never cache it as one.
     if (!/#EXT-X-ENDLIST/.test(list)) throw new Error('Live subtitle playlists are not supported');
     if (/#EXT-X-KEY:(?![^\n]*METHOD=NONE)/.test(list)) throw new Error('Encrypted subtitles are not supported');
@@ -128,7 +129,7 @@
     }
     if (!cues.length) throw new Error('The subtitle segments are not WebVTT');
     const duration = [...list.matchAll(/^#EXTINF:([\d.]+)/gm)].reduce((sum, match) => sum + Number(match[1]), 0);
-    publish(url, `WEBVTT\n\n${cues.join('\n\n')}\n`, page, language, duration, first);
+    publish(url, `WEBVTT\n\n${cues.join('\n\n')}\n`, page, language, duration, first, declared);
   }
   const attributes = line => Object.fromEntries([...line.matchAll(/([A-Z0-9-]+)=("[^"]*"|[^,]*)/g)].map(m => [m[1], m[2].replace(/^"|"$/g, '')]));
   const manifestsSeen = new Set();
@@ -222,10 +223,10 @@
     return Reflect.apply(openOriginal, this, args);
   };
   // A <track src> can be loaded directly without touching its enabled/disabled mode.
-  function scanTracks() { for (const t of document.querySelectorAll('video track[src]')) void fetchSubtitle(t.src, location.pathname, t.srclang || ''); }
+  function scanTracks() { for (const t of document.querySelectorAll('video track[src]')) void fetchSubtitle(t.src, location.pathname, t.srclang || '', false, true); }
   function retryDiscovered() {
     for (const item of [...discovered.values()]) {
-      if (item.page === location.pathname) void fetchSubtitle(item.url, item.page, item.language, item.listed);
+      if (item.page === location.pathname) void fetchSubtitle(item.url, item.page, item.language, item.listed, item.declared);
     }
   }
   let lastReplay = 0;

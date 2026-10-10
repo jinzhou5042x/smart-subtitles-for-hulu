@@ -6,6 +6,10 @@ import { SubtitleDatabase, episodeHash, addUsage } from './database.mjs';
 
 export const EPISODE_VERSION = 6;
 const covered = segments => segments.reduce((n, segment) => n + segment.sourceIds.length, 0);
+// Only these stop a translation until the viewer does something: an account, a quota, a key, a
+// missing program. Everything else (a model's slip, a dropped connection, a restart) is retried
+// by the page without asking.
+export const needsViewer = message => /usage limit|quota|rate.?limit|billing|payment|credit|not (?:logged|signed) in|sign.?in|log.?in|unauthori[sz]ed|\b40[13]\b|api key|key file|not enabled|not installed|ENOENT/i.test(message || '');
 
 // Tracks whole-episode jobs. Completed one-minute sections of an unfinished episode are written to
 // the database before publication, under the subtitles' hash, the target language and the translator,
@@ -27,7 +31,7 @@ export class EpisodeManager {
     }
     const episode = this.episodes.get(id);
     if (episode.cancelled && episode.task) await episode.task;
-    // An earlier failed/cancelled in-memory request must see a result completed by another mode.
+    // An earlier failed/cancelled in-memory request must see a result this translator completed since.
     if (!episode.running) {
       const cached = this.database.get(request);
       if (cached) { episode.segments = cached; episode.completedCues = request.cues.length; episode.status = 'done'; episode.cached = true; episode.error = ''; episode.usage = this.database.usage(request); }
@@ -66,7 +70,7 @@ export class EpisodeManager {
     const start = Math.max(0, Math.min(e.segments.length, Number(after) || 0));
     const segments = e.segments.slice(start, start + 1000);
     const progress = e.progress;
-    return { id: e.id, status: e.status, hash: e.hash, cached: !!e.cached, totalCues: e.request.cues.length, completedCues: e.completedCues, segments, cursor: start + segments.length, segmentCount: e.segments.length, error: e.error, progress, usage: e.usage || null, elapsedMs: (e.finished || Date.now()) - e.started };
+    return { id: e.id, status: e.status, needsUser: e.status === 'error' && !!e.needsUser, hash: e.hash, cached: !!e.cached, totalCues: e.request.cues.length, completedCues: e.completedCues, segments, cursor: start + segments.length, segmentCount: e.segments.length, error: e.error, progress, usage: e.usage || null, elapsedMs: (e.finished || Date.now()) - e.started };
   }
   get(id, after) { const e = this.episodes.get(id); if (e) e.lastAccess = Date.now(); return this.public(e, after); }
   cancel(client, epoch) {
@@ -93,9 +97,6 @@ export class EpisodeManager {
     e.segments = [...accepted]; e.completedCues = covered(accepted); e.accepted = accepted;
     // Tokens of earlier, interrupted runs; this run's are added as Codex reports them.
     const baseUsage = this.database.usage(e.request, { partial: true }); e.usage = baseUsage;
-    // While a better provider replaces an existing complete result, keep showing that result.
-    const preview = !accepted.length && this.database.get(e.request, { fallback: true });
-    if (preview) e.segments = preview;
     try {
         let job = this.queue.submit({ ...e.request, accepted, client: `episode-${e.id}`, epoch: String(e.started), context: [], wholeEpisode: true });
         while (['queued', 'running'].includes(job.status)) {
@@ -108,7 +109,7 @@ export class EpisodeManager {
               const count = covered(partialSegments);
               accepted = validateTranslation({ segments: partialSegments }, e.request.cues.slice(0, count));
               this.remember(e, { accepted });
-              if (!preview) { e.segments = accepted; e.completedCues = count; }
+              e.segments = accepted; e.completedCues = count;
             }
           }
           await new Promise(resolve => setTimeout(resolve, 200));
@@ -118,16 +119,16 @@ export class EpisodeManager {
         }
         if (job?.progress?.usage) e.usage = addUsage(baseUsage, job.progress.usage);
         if (!e.cancelled) {
-          if (job.status !== 'done') throw new Error(job.error || 'Episode translation cancelled');
+          if (job.status !== 'done') throw Object.assign(new Error(job.error || 'Episode translation cancelled'), { needsUser: job.needsUser });
           const complete = validateTranslation({ segments: job.segments }, e.request.cues);
           e.dirty = false; this.database.put(e.request, complete, e.usage);
-          const stored = this.database.get(e.request);
+          const stored = this.database.get({ ...e.request, redo: undefined });
           if (!stored) throw new Error('Saved subtitles could not be read back');
           e.segments = stored;
           e.completedCues = e.request.cues.length;
         }
       e.status = e.cancelled ? 'cancelled' : 'done';
-    } catch (error) { e.status = 'error'; e.error = error.message; }
+    } catch (error) { e.status = 'error'; e.error = error.message; e.needsUser = !!error.needsUser || needsViewer(error.message); }
     finally {
       this.flush(e);
       // A fast checkpoint followed by an error can fall between polling ticks.

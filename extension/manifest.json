@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Smart Subtitles for Disney+ & Hulu",
+  "name": "Smart Subtitles",
   "version": "0.9.4",
   "description": "Bilingual AI subtitles for Hulu and Disney+ videos. Unofficial; not affiliated with Disney or Hulu.",
   "icons": {
@@ -28,7 +28,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Smart Subtitles for Disney+ & Hulu",
+    "default_title": "Smart Subtitles",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
@@ -64,6 +64,11 @@
         "core.js",
         "ttml.js",
         "site.js",
+        "players/hulu.js",
+        "players/disney.js",
+        "tracks.js",
+        "session.js",
+        "overlay.js",
         "content.js"
       ],
       "run_at": "document_idle",

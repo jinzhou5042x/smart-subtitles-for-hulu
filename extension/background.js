@@ -38,9 +38,9 @@ async function request(route, method = 'GET', body) {
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
-async function broadcastSettings(next) {
+async function broadcastSettings(next, retryProvider) {
   const tabs = await chrome.tabs.query({ url: globalThis.SubtitleSites.matches });
-  await Promise.allSettled(tabs.map(t => chrome.tabs.sendMessage(t.id, { type: 'settingsChanged', settings: next })));
+  await Promise.allSettled(tabs.map(t => chrome.tabs.sendMessage(t.id, { type: 'settingsChanged', settings: next, ...(retryProvider ? { retryProvider } : {}) })));
 }
 let watchingPicker = false;
 async function restorePickerPopup(id) {
@@ -66,7 +66,7 @@ async function watchPicker() {
       catch { state = { id: googlePicker.id, status: 'error', error: 'Cannot reach the companion. Reopen setup to try again.' }; }
       await chrome.storage.session.set({ googlePicker: state });
       if (state.status !== 'pending') {
-        if (state.status === 'done') await broadcastSettings(await settings());
+        if (state.status === 'done') await broadcastSettings(await settings(), 'google');
         await chrome.storage.session.set({ googlePicker: state });
         await restorePickerPopup(state.id);
         return;
@@ -139,8 +139,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       case 'configureGoogle': {
         if (!isPopup(sender)) throw new Error('Popup only');
         const result = await request('/settings/google', 'POST', message.clear ? { clear: true } : { file: message.file });
-        await broadcastSettings(await settings());
+        await broadcastSettings(await settings(), result.configured ? 'google' : undefined);
         return result;
+      }
+      case 'codexAccount': {
+        if (!isPopup(sender) || !['sign-in', 'sign-out', 'cancel'].includes(message.action)) throw new Error('Popup only');
+        return request('/settings/codex/' + message.action, 'POST', {});
       }
       case 'subtitleResource': {
         if (!isContent(sender) || globalThis.SubtitleSites.identify(sender.url) !== 'disney') throw new Error('Disney+ player only');
@@ -149,6 +153,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       case 'prepareEpisode': {
         if (!isContent(sender)) throw new Error('Player only');
         const config = await settings(); if (!config.enabled) throw new Error('Subtitles are turned off');
+        // Selection is a preference, not proof that setup has finished. Check the
+        // companion before sending any subtitle text or creating a translation job.
+        if (config.provider === 'google') {
+          const status = await request('/status');
+          if (!status.googleConfigured || !status.providers?.includes('google')) return { status: 'awaiting-key' };
+        }
         const client = `tab-${sender.tab.id}-${sender.frameId || 0}`;
         const tabClients = clients.get(sender.tab.id) || new Set(); tabClients.add(client); clients.set(sender.tab.id, tabClients);
         await chrome.tabs.get(sender.tab.id);
@@ -166,7 +176,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       }
       default: throw new Error('Unknown message');
     }
-  })().then(data => respond({ ok: true, data }), e => respond({ ok: false, error: e.message === 'Failed to fetch' ? 'The local service is not running; run "Start Subtitles.cmd"' : e.message }));
+  })().then(data => respond({ ok: true, data }), e => respond({ ok: false, error: e.message === 'Failed to fetch' ? 'Cannot connect to the subtitle service. Run Start Subtitles.command on Mac or Start Subtitles.cmd on Windows.' : e.message }));
   return true;
 });
 chrome.tabs.onRemoved.addListener(tabId => { clients.delete(tabId); request('/cancelTab', 'POST', { tabId }).catch(() => {}); });

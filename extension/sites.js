@@ -2,6 +2,8 @@
 (function (scope) {
   const domain = (host, root) => host === root || host.endsWith('.' + root);
   scope.SubtitleSites = {
+    // Shown where the product says what it works on; the product name itself names no service.
+    names: ['Hulu', 'Disney+'],
     matches: ['https://*.hulu.com/*', 'https://hulu.com/*', 'https://*.disneyplus.com/*', 'https://disneyplus.com/*', 'http://127.0.0.1/*'],
     identify(value) {
       try {

@@ -26,6 +26,6 @@ try {
 $serverFile = Join-Path $projectRoot 'service/server.mjs'
 Start-Process -FilePath $nodePath -ArgumentList @('"' + $serverFile + '"') -WorkingDirectory $projectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $projectRoot 'logs/stdout.log') -RedirectStandardError (Join-Path $projectRoot 'logs/stderr.log')
 if ($development) { Write-Host 'Subtitle service started. Load dist/extension in Chrome and refresh Hulu.' }
-else { Write-Host 'Smart Subtitles for Disney+ & Hulu is running. Keep it running while you watch; run "Stop Subtitles.cmd" to stop it.' }
+else { Write-Host 'Smart Subtitles is running. Keep it running while you watch; run "Stop Subtitles.cmd" to stop it.' }
 Write-Host ''
 Write-Host "Pairing code (paste it into the extension if it asks): $($local.pairingToken)"

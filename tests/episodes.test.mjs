@@ -24,7 +24,7 @@ test('closing a tab cancels its running episode and prevents a pending submit fr
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('switching an unfinished provider aborts it; after completion every mode reuses the winner', async () => {
+test('switching an unfinished provider aborts it; a completed provider is reused only by itself', async () => {
   const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
   const calls = []; let aborted = false;
   const queue = new JobQueue({ translate: async (r, signal) => {
@@ -41,12 +41,13 @@ test('switching an unfinished provider aborts it; after completion every mode re
     await Promise.all([manager.episodes.get(first.id).task,manager.episodes.get(second.id).task]);
     assert.equal(aborted,true); assert.equal(manager.get(first.id).status,'cancelled');
     assert.equal(manager.get(second.id).status,'done');
-    const restored = await manager.submit({...request,epoch:'3'});
+    const restored = await new EpisodeManager(queue,{model:'changed'},dir).submit({...request,provider:'local',epoch:'3'});
     assert.equal(restored.status,'done'); assert.equal(restored.cached,true); assert.equal(restored.segments[0].text,'本地译文');
-    const google = await new EpisodeManager(queue,{model:'changed'},dir).submit({...request,epoch:'4'});
-    assert.equal(google.status,'done'); assert.equal(google.segments[0].text,'本地译文');
-    assert.deepEqual(calls,['google','local']);
-  } finally { await rm(dir,{recursive:true,force:true}); }
+    // Google never finished: it starts again instead of borrowing the local result.
+    const google = await manager.submit({...request,epoch:'4'});
+    assert.notEqual(google.status,'done'); assert.deepEqual(google.segments,[]);
+    assert.deepEqual(calls,['google','local','google']);
+  } finally { manager.cancelTab(42); await rm(dir,{recursive:true,force:true}); }
 });
 
 test('one input includes the entire episode and one output preserves timing and durable cache', async () => {
@@ -106,7 +107,7 @@ test('validated batches are visible before completion but never enter the comple
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
 
-test('Codex replaces a finished batch translation while still showing it; other languages translate separately', async () => {
+test('Codex translates beside a finished batch translation without showing it; other languages translate separately', async () => {
   const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
   const calls = []; let release;
   const gate = new Promise(resolve => { release = resolve; });
@@ -120,11 +121,11 @@ test('Codex replaces a finished batch translation while still showing it; other 
   try {
     const local = await manager.submit(request); await manager.episodes.get(local.id).task;
     const codex = await manager.submit({...request,provider:'codex',epoch:'2'});
-    assert.notEqual(codex.status,'done'); assert.equal(codex.segments[0].text,'local-zh-CN');
+    assert.notEqual(codex.status,'done'); assert.deepEqual(codex.segments,[]);
     release(); await manager.episodes.get(codex.id).task;
     assert.equal(manager.get(codex.id).segments[0].text,'codex-zh-CN');
     const again = await manager.submit({...request,epoch:'3'});
-    assert.equal(again.status,'done'); assert.equal(again.segments[0].text,'codex-zh-CN');
+    assert.equal(again.status,'done'); assert.equal(again.segments[0].text,'local-zh-CN');
     const ja = await manager.submit({...request,target:'ja',epoch:'4'}); await manager.episodes.get(ja.id).task;
     assert.equal(manager.get(ja.id).segments[0].text,'local-ja');
     assert.deepEqual(calls,['local:zh-CN','codex:zh-CN','local:ja']);
@@ -279,5 +280,82 @@ test('16 videos translate at once; closing one tab stops only its translation an
     assert.deepEqual(manager.get(reloaded.id).segments.map(s => s.text), ['译3-0', '译3-1', '译3-2']);
     for (let k = 0; k < 17; k++) if (k !== 3) manager.cancelTab(k);
     await Promise.all([...manager.episodes.values()].map(e => e.task));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('each translator keeps its own result and progress; switching never shows another translator\'s lines', async () => {
+  const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
+  const calls = []; let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const queue = new JobQueue({ translate: async r => {
+    calls.push(r.provider);
+    if (r.provider === 'codex') await gate;
+    return [{sourceIds:['a'],text:`${r.provider} line`,start:0,end:1}];
+  } }, {});
+  const manager = new EpisodeManager(queue,{},dir);
+  const request = {client:'tab-9-0',epoch:'1',session:'own',provider:'google',target:'zh-CN',context:[],cues:[{id:'a',start:0,end:1,text:'Hello'}]};
+  try {
+    const google = await manager.submit(request); await manager.episodes.get(google.id).task;
+    assert.equal(manager.get(google.id).segments[0].text,'google line');
+    // Codex has no result yet: nothing of Google's may be shown as Codex's, cached or as a preview.
+    const codex = await manager.submit({...request,provider:'codex',epoch:'2'});
+    assert.notEqual(codex.status,'done'); assert.equal(codex.cached,false); assert.deepEqual(codex.segments,[]);
+    await new Promise(resolve => setTimeout(resolve, 450));
+    assert.deepEqual(manager.get(codex.id).segments,[]);
+    release(); await manager.episodes.get(codex.id).task;
+    assert.equal(manager.get(codex.id).segments[0].text,'codex line');
+    // Switching back restores Google's own stored result, without translating again.
+    const fresh = new EpisodeManager(queue,{},dir);
+    const back = await fresh.submit({...request,epoch:'3'});
+    assert.equal(back.status,'done'); assert.equal(back.cached,true); assert.equal(back.segments[0].text,'google line');
+    const again = await fresh.submit({...request,provider:'codex',epoch:'4'});
+    assert.equal(again.status,'done'); assert.equal(again.segments[0].text,'codex line');
+    assert.deepEqual(calls,['google','codex']);
+  } finally { release(); manager.cancelTab(9); await rm(dir,{recursive:true,force:true}); }
+});
+
+test('translating an episode again runs the translator, serves the old lines until it is done, and survives a failure', async () => {
+  const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
+  let round = 0, fail = true, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const queue = new JobQueue({ translate: async r => {
+    round++;
+    if (r.redo && fail) { fail = false; throw new Error('usage limit'); }
+    if (r.redo) await gate;
+    return [{ sourceIds: ['a'], text: `round ${round}`, start: 0, end: 1 }];
+  } }, {});
+  const manager = new EpisodeManager(queue, {}, dir);
+  const request = { client: 'tab-3-0', epoch: '1', session: 'again', provider: 'codex', target: 'zh-CN', context: [], cues: [{ id: 'a', start: 0, end: 1, text: 'Hello' }] };
+  const redo = { ...request, redo: '22222222-2222-4222-8222-222222222222' };
+  try {
+    const first = await manager.submit(request); await manager.episodes.get(first.id).task;
+    assert.equal(manager.get(first.id).segments[0].text, 'round 1');
+    const failed = await manager.submit({ ...redo, epoch: '2' }); await manager.episodes.get(failed.id).task;
+    assert.notEqual(failed.id, first.id); assert.equal(manager.get(failed.id).status, 'error');
+    assert.equal(manager.database.get(request)[0].text, 'round 1', 'a failed redo leaves the subtitles in use');
+    const again = await manager.submit({ ...redo, epoch: '3' });
+    assert.equal(again.id, failed.id); assert.notEqual(again.status, 'done');
+    assert.equal((await new EpisodeManager(queue, {}, dir).submit({ ...request, epoch: '4' })).segments[0].text, 'round 1', 'other pages keep the old lines meanwhile');
+    release(); await manager.episodes.get(again.id).task;
+    assert.equal(manager.get(again.id).status, 'done'); assert.equal(manager.get(again.id).segments[0].text, 'round 3');
+    assert.equal(manager.database.get(request)[0].text, 'round 3');
+    const late = await manager.submit({ ...redo, epoch: '5' });
+    assert.equal(late.status, 'done'); assert.equal(round, 3, 'the same attempt is not translated twice');
+  } finally { release(); manager.cancelTab(3); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('an episode says whether its failure needs the viewer: accounts and quotas do, a model slip or a crash does not', async () => {
+  const { needsViewer } = await import('../service/episodes.mjs');
+  for (const message of ["You've hit your usage limit. Try again at 3:40 PM.", 'unexpected status 401 Unauthorized', 'Not logged in', 'Link your Google API key file in the extension', 'Google Translate request failed (HTTP 403); check the API key, that the API is enabled, and the quota', 'The codex translator is not enabled']) assert.equal(needsViewer(message), true, message);
+  for (const message of ['Subtitle 507.174–510.427 does not match its original source (different text)', 'Codex exited (1)', 'Translation timed out', 'Codex turn/start timed out', 'stream disconnected before completion', 'Episode task expired']) assert.equal(needsViewer(message), false, message);
+  const dir = await mkdtemp(path.join(root, 'data/test-episodes-'));
+  const failing = message => new JobQueue({ translate: async () => { throw new Error(message); } }, {});
+  const request = { client: 'tab-6-0', epoch: '1', session: 'kind', provider: 'codex', target: 'zh-CN', context: [], cues: [{ id: 'a', start: 0, end: 1, text: 'Hello' }] };
+  try {
+    for (const [message, expected] of [['Codex exited (1)', false], ['usage limit reached', true]]) {
+      const manager = new EpisodeManager(failing(message), {}, dir);
+      const episode = await manager.submit({ ...request, session: message }); await manager.episodes.get(episode.id).task;
+      assert.equal(manager.get(episode.id).status, 'error'); assert.equal(manager.get(episode.id).needsUser, expected, message);
+    }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

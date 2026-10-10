@@ -12,10 +12,14 @@ import path from 'node:path';
 import { root } from '../service/config.mjs';
 
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-const name = `SmartSubtitlesForDisneyPlusAndHulu-Service-${pkg.version}-win-x64`;
+const target = process.argv[2] || (process.platform === 'darwin' ? `darwin-${process.arch}` : 'win-x64');
+if (!['win-x64', 'darwin-arm64', 'darwin-x64'].includes(target)) throw new Error('Unsupported release target');
+const mac = target.startsWith('darwin-');
+if (mac && process.platform !== 'darwin') throw new Error('Build macOS releases on macOS');
+const name = `SmartSubtitlesForDisneyPlusAndHulu-Service-${pkg.version}-${target}`;
 const releaseDir = path.join(root, 'dist/release'), out = path.join(releaseDir, name), cache = path.join(releaseDir, 'cache');
 // Windows' own bsdtar (zip support); a GNU tar earlier on PATH would read 'C:' as a remote host.
-const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : '/usr/bin/tar';
 const sha256 = data => createHash('sha256').update(data).digest('hex');
 await rm(out, { recursive: true, force: true });
 await mkdir(out, { recursive: true }); await mkdir(cache, { recursive: true });
@@ -24,19 +28,22 @@ const FILES = [
   'service/codex.mjs', 'service/config.mjs', 'service/database.mjs', 'service/episodes.mjs', 'service/jobs.mjs', 'service/server.mjs', 'service/translation.mjs',
   'service/checkpoints.mjs', 'service/keyed.mjs', 'service/google.mjs', 'service/google-settings.mjs', 'service/google-picker.mjs', 'service/key-picker.cs', 'service/native-key-picker.mjs',
   'shared/languages.js', 'config/default.json',
+  'service/key-picker.swift', 'service/local.mjs', 'service/local-format.mjs',
+  'scripts/companion.mjs', 'scripts/macos.sh',
   'scripts/start.ps1', 'scripts/stop.ps1', 'scripts/setup-codex.ps1', 'scripts/configure-codex.mjs', 'scripts/doctor.mjs'
 ];
 for (const file of FILES) { await mkdir(path.dirname(path.join(out, file)), { recursive: true }); await cp(path.join(root, file), path.join(out, file)); }
 const defaults = JSON.parse(await readFile(path.join(out, 'config/default.json'), 'utf8'));
 if (JSON.stringify(defaults.providers) !== '["codex"]') throw new Error('The release must enable Codex only');
-await writeFile(path.join(out, 'package.json'), JSON.stringify({ name: 'smart-subtitles-for-disney-plus-and-hulu-service', version: pkg.version, private: true, type: 'module' }, null, 2) + '\n');
+await writeFile(path.join(out, 'package.json'), JSON.stringify({ name: 'smart-subtitles-service', version: pkg.version, private: true, type: 'module' }, null, 2) + '\n');
 await cp(path.join(root, 'extension/legal.html'), path.join(out, 'TERMS-AND-PRIVACY.html'));
 const launcher = command => `@echo off\r\ncd /d "%~dp0"\r\n${command}\r\npause\r\n`;
+if (!mac) {
 await writeFile(path.join(out, 'Start Subtitles.cmd'), launcher('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\start.ps1"'));
 await writeFile(path.join(out, 'Stop Subtitles.cmd'), launcher('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\stop.ps1"'));
 await writeFile(path.join(out, 'Set Up Codex.cmd'), launcher('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\setup-codex.ps1"'));
 await writeFile(path.join(out, 'Check Environment.cmd'), launcher('"%~dp0node\\node.exe" scripts\\doctor.mjs'));
-await writeFile(path.join(out, 'README.txt'), `Smart Subtitles for Disney+ & Hulu - companion service ${pkg.version} (Windows)
+await writeFile(path.join(out, 'README.txt'), `Smart Subtitles - companion service ${pkg.version} (Windows)
 =====================================================================
 
 The Chrome extension shows bilingual subtitles on Hulu. This service runs on your own computer,
@@ -49,7 +56,7 @@ Install
      installs the official Codex CLI into this folder (about 430 MB download), and opens the ChatGPT
      sign-in in your browser. You need a ChatGPT account with Codex access.
   3. Double-click "Start Subtitles.cmd" and copy the pairing code it shows.
-  4. Click the Smart Subtitles for Disney+ & Hulu extension icon in Chrome, paste the pairing code, click Connect.
+  4. Click the Smart Subtitles extension icon in Chrome, paste the pairing code, click Connect.
   5. Open a Hulu video that has English subtitles and choose your language in the extension.
 
 Every day
@@ -63,8 +70,16 @@ Notes
   - Unofficial tool, not affiliated with Hulu. See TERMS-AND-PRIVACY.html.
 `.replace(/\n/g, '\r\n'));
 
+}
+if (mac) {
+  for (const file of ['Start Subtitles.command', 'Stop Subtitles.command', 'Set Up Codex.command', 'Check Environment.command']) await cp(path.join(root, file), path.join(out, file));
+  await mkdir(path.join(out, 'runtime/key-picker'), { recursive: true });
+  execFileSync('/usr/bin/swiftc', [path.join(root, 'service/key-picker.swift'), '-target', target.endsWith('arm64') ? 'arm64-apple-macosx13.0' : 'x86_64-apple-macosx13.0', '-o', path.join(out, 'runtime/key-picker/picker')]);
+  await writeFile(path.join(out, 'README.txt'), `macOS Chrome companion ${pkg.version}\nUnzip into a permanent folder. Double-click Set Up Codex.command once, then Start Subtitles.command. Paste the pairing code into the Chrome extension. Google users can skip Codex setup and link their key file from the extension. Stop with Stop Subtitles.command. macOS 13 or later. If macOS blocks a launcher, use Finder's Open action or Privacy & Security to allow this downloaded tool after reviewing its source.\n`);
+}
+
 // Official portable Node.js, the same version the service is developed and tested with.
-const nodeVersion = process.version, nodeZip = `node-${nodeVersion}-win-x64.zip`, base = `https://nodejs.org/dist/${nodeVersion}/`;
+const nodeVersion = process.version, nodeZip = `node-${nodeVersion}-${target}.${mac ? 'tar.gz' : 'zip'}`, base = `https://nodejs.org/dist/${nodeVersion}/`;
 const cached = path.join(cache, nodeZip);
 if (!existsSync(cached)) {
   const response = await fetch(base + nodeZip); if (!response.ok) throw new Error(`Download failed: ${response.status}`);
@@ -74,14 +89,14 @@ const sums = await (await fetch(base + 'SHASUMS256.txt')).text();
 const expected = sums.split('\n').find(line => line.endsWith('  ' + nodeZip))?.split(' ')[0];
 if (!expected || expected !== sha256(await readFile(cached))) throw new Error(`${nodeZip} does not match the official SHA-256`);
 execFileSync(tar, ['-xf', cached, '-C', out]);
-await rename(path.join(out, `node-${nodeVersion}-win-x64`), path.join(out, 'node'));
+await rename(path.join(out, `node-${nodeVersion}-${target}`), path.join(out, 'node'));
 
 // Secret scan: the developer's own values, and anything shaped like an API key or pairing code.
-const own = JSON.parse(await readFile(path.join(root, 'config/local.json'), 'utf8'));
+const own = JSON.parse(await readFile(path.join(root, 'config/local.json'), 'utf8').catch(error => { if (error.code === 'ENOENT') return '{}'; throw error; }));
 const secrets = [own.pairingToken, own.googleApiKey].filter(Boolean);
 const patterns = [/AIza[0-9A-Za-z_-]{35}/, /\b[a-f0-9]{48}\b/, /sk-[A-Za-z0-9]{20,}/];
 for (const file of await readdir(out, { recursive: true })) {
-  if (file.startsWith('node' + path.sep)) continue; // official, checksum-verified Node.js files
+  if (file === 'runtime/key-picker/picker' || file.startsWith('node' + path.sep)) continue; // official, checksum-verified Node.js files
   if (/local\.json$|\.sqlite$|local-connection\.json$/.test(file)) throw new Error(`Private file in the release: ${file}`);
   const full = path.join(out, file); if ((await stat(full)).isDirectory()) continue;
   const text = await readFile(full, 'utf8');
@@ -90,7 +105,8 @@ for (const file of await readdir(out, { recursive: true })) {
 
 const zip = path.join(releaseDir, `${name}.zip`);
 await rm(zip, { force: true });
-execFileSync(tar, ['-a', '-c', '-f', zip, '-C', releaseDir, name]);
+if (process.platform === 'win32') execFileSync(tar, ['-a', '-c', '-f', zip, '-C', releaseDir, name]);
+else execFileSync('/usr/bin/zip', ['-q', '-r', zip, name], { cwd: releaseDir });
 const digest = sha256(await readFile(zip));
 await writeFile(zip + '.sha256.txt', `${digest}  ${name}.zip\n`);
 console.log(`${zip}\n${Math.round((await stat(zip)).size / 1048576)} MB, SHA-256 ${digest}`);

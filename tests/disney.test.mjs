@@ -6,7 +6,8 @@ import '../extension/sites.js';
 import { readSubtitleResource } from '../extension/subtitle-resource.js';
 
 const sites = globalThis.SubtitleSites;
-const profileCode = await readFile(new URL('../extension/site.js', import.meta.url), 'utf8');
+// The player layer as the page loads it: the contract, then one adapter per service.
+const profileCode = (await Promise.all(['site.js', 'players/hulu.js', 'players/disney.js'].map(file => readFile(new URL('../extension/' + file, import.meta.url), 'utf8')))).join('\n');
 const captureCode = await readFile(new URL('../extension/capture.js', import.meta.url), 'utf8');
 const video = (width, extra = {}) => ({ id: '', paused: true, ended: false, readyState: 4, getBoundingClientRect: () => ({ width, height: width / 2 }), ...extra });
 
@@ -287,12 +288,49 @@ test('a frozen visible timeline must not drag the subtitle clock backwards', () 
   assert.equal(p.SubtitleSite.subtitleTime(movie), 110);
 });
 
-test('stale visual bar width cannot override a fresh numeric content time', () => {
-  const slider = { getAttribute: name => name === 'aria-valuenow' ? '110' : '1000', querySelector: () => ({ style: { width: '10%' } }) };
-  const p = profile('https://www.disneyplus.com/play/episode', [], { 'main-app-controls-overlay': { shadowRoot: { querySelector: () => slider, querySelectorAll: () => [] } } });
-  assert.equal(p.SubtitleSite.subtitleTime(video(1200, { currentTime: 130, paused: false })), 110);
+// Measured on Disney+ (2026-10-09): the number is written when the controls appear and then
+// freezes; the bar's width keeps the real time. Falling back to the frozen number rewound
+// subtitles, and trusting it for a first reading taken late left them seconds behind.
+test('a frozen Disney number never rewinds or delays the clock while the live bar keeps time', () => {
+  const offset = 20, maximum = 5491;
+  let media = 120.3;
+  const progress = { style: { width: '' } };
+  const slider = { getAttribute: name => name === 'aria-valuenow' ? '100' : String(maximum), querySelector: () => progress };
+  const elements = { 'main-app-controls-overlay': { shadowRoot: { querySelector: () => slider, querySelectorAll: () => [] } } };
+  const p = profile('https://www.disneyplus.com/play/episode', [], elements);
+  const movie = video(1200, { id: 'hivePlayer1', currentTime: media, paused: false });
+  // The bar is rewritten every 0.26 s; the overlay polls every 0.15 s. The first poll comes
+  // three seconds after the controls appeared, when the number is already three seconds old.
+  let written = -Infinity, previous = -Infinity, worst = 0;
+  for (let step = 0; step < 400; step++) {
+    media = 123.3 + step * 0.15; movie.currentTime = media;
+    while (written + 0.26 <= media) written = written === -Infinity ? media - 0.2 : written + 0.26;
+    progress.style.width = `${((written - offset) / maximum * 100).toFixed(5)}%`;
+    const time = p.SubtitleSite.subtitleTime(movie);
+    assert.ok(time > previous, 'subtitle time never moves backwards');
+    previous = time;
+    if (step >= 20) worst = Math.max(worst, Math.abs(time - (media - offset)));
+  }
+  assert.ok(worst <= 0.03, `the clock settles within 30 ms of the title time (was ${worst})`);
 });
 
+test('a pointer dragging the Disney bar ahead of the picture does not move subtitles until the picture follows', () => {
+  const maximum = 5000, progress = { style: { width: '2%' } };
+  const slider = { getAttribute: name => name === 'aria-valuenow' ? '100' : String(maximum), querySelector: () => progress };
+  const p = profile('https://www.disneyplus.com/play/episode', [], { 'main-app-controls-overlay': { shadowRoot: { querySelector: () => slider, querySelectorAll: () => [] } } });
+  const movie = video(1200, { id: 'hivePlayer1', currentTime: 120, paused: false });
+  assert.equal(p.SubtitleSite.subtitleTime(movie), 100);
+  // The bar follows the pointer across the film while the picture plays on.
+  for (const [media, percent] of [[120.15, 30], [120.3, 44], [120.45, 61], [120.6, 2.4]]) {
+    movie.currentTime = media; progress.style.width = `${percent}%`;
+    assert.ok(Math.abs(p.SubtitleSite.subtitleTime(movie) - (media - 20)) < 1e-9);
+  }
+  // A real jump (the picture moved on the media timeline) is taken once the next reading agrees.
+  movie.currentTime = 500; progress.style.width = '8%';
+  p.SubtitleSite.subtitleTime(movie);
+  movie.currentTime = 500.26; progress.style.width = '8.0052%';
+  assert.ok(Math.abs(p.SubtitleSite.subtitleTime(movie) - 400.26) < 1e-9);
+});
 
 test('Hulu dedicated content clock ignores rounded or frozen UI timing, including after ads', () => {
   const movie = video(1200, { id: 'content-video-player', currentTime: 215.949045, paused: true });
@@ -364,4 +402,163 @@ test('Disney ignores pixel widths and rejects invalid numeric timeline values', 
     [current, maximum] = values;
     assert.ok(Number.isNaN(p.SubtitleSite.subtitleTime(video(1200, { id: 'hivePlayer2', currentTime: 38.5 }))));
   }
+});
+
+test('Disney uses the selected subtitle file origin even when the clock existed before the file was chosen', () => {
+  const p = profile('https://www.disneyplus.com/play/episode');
+  const movie = { currentTime: 35, paused: false };
+  // The overlay asks for the time on every tick, before any subtitle file is selected.
+  assert.equal(p.SubtitleSite.subtitleTime(movie, 0), 35);
+  assert.equal(p.SubtitleSite.subtitleTime(movie, 25), 10);
+});
+
+test('a new Disney video element on the next title ignores the previous title\'s leftover controls', () => {
+  let now = 1290, maximum = 1300;
+  const slider = { getAttribute: name => String(name === 'aria-valuenow' ? now : maximum) };
+  const elements = { 'main-app-controls-overlay': { shadowRoot: { querySelector: () => slider, querySelectorAll: () => [] } }, '.text-to-speech-status': { textContent: 'Paused at 1290500.' } };
+  const p = profile('https://www.disneyplus.com/play/one', [], elements);
+  assert.equal(p.SubtitleSite.subtitleTime(video(1200, { currentTime: 1310, paused: false })), 1290);
+  p.location.pathname = '/play/two';
+  const next = video(1200, { currentTime: 3, paused: true });
+  // Neither the frozen slider nor the old pause announcement describes the new title.
+  assert.ok(Number.isNaN(p.SubtitleSite.subtitleTime(next)));
+  next.paused = false; next.currentTime = 3.5;
+  assert.ok(Number.isNaN(p.SubtitleSite.subtitleTime(next)));
+  now = 4; maximum = 1400; next.currentTime = 4.2;
+  assert.equal(p.SubtitleSite.subtitleTime(next), 4);
+});
+
+test('an unrecognized Disney pre-roll seen first does not lock subtitles out of the episode', () => {
+  let now = 5, maximum = 30;
+  const slider = { getAttribute: name => String(name === 'aria-valuenow' ? now : maximum) };
+  const p = profile('https://www.disneyplus.com/play/episode', [], { 'main-app-controls-overlay': { shadowRoot: { querySelector: () => slider, querySelectorAll: () => [] } } });
+  const movie = video(1200, { currentTime: 5, paused: false });
+  p.SubtitleSite.subtitleTime(movie);
+  // The episode's longer timeline replaces the ad's; the shorter one is never adopted afterwards.
+  now = 1; maximum = 1000; movie.currentTime = 31;
+  assert.equal(p.SubtitleSite.subtitleTime(movie), 1);
+  now = 3; maximum = 30; movie.currentTime = 400;
+  assert.ok(Number.isNaN(p.SubtitleSite.subtitleTime(movie)));
+  now = 370; maximum = 1000; movie.currentTime = 431;
+  assert.equal(p.SubtitleSite.subtitleTime(movie), 370);
+});
+
+test('the sync prompt is only for a Disney clock that needs a sample, never for seeks or Hulu', () => {
+  const hulu = profile('https://www.hulu.com/watch/episode');
+  const seeking = video(1200, { id: 'content-video-player', currentTime: 50, seeking: true });
+  assert.ok(Number.isNaN(hulu.SubtitleSite.subtitleTime(seeking)));
+  assert.equal(hulu.SubtitleSite.awaitingClock(seeking), false);
+  const elements = {};
+  const disney = profile('https://www.disneyplus.com/play/episode', [], elements);
+  let clock = 0; disney.Date = { now: () => clock };
+  const movie = video(1200, { id: 'hivePlayer1', currentTime: 45, paused: true });
+  assert.ok(Number.isNaN(disney.SubtitleSite.subtitleTime(movie)));
+  assert.equal(disney.SubtitleSite.awaitingClock(movie), false, 'the clock first asks for the controls itself');
+  clock = 1100;
+  assert.ok(Number.isNaN(disney.SubtitleSite.subtitleTime(movie)));
+  assert.equal(disney.SubtitleSite.awaitingClock(movie), true);
+  elements['.text-to-speech-status'] = { textContent: 'Paused at 25000.' };
+  assert.equal(disney.SubtitleSite.subtitleTime(movie), 25);
+  assert.equal(disney.SubtitleSite.awaitingClock(movie), false);
+  movie.seeking = true;
+  assert.ok(Number.isNaN(disney.SubtitleSite.subtitleTime(movie)));
+  assert.equal(disney.SubtitleSite.awaitingClock(movie), false);
+});
+
+// A refresh starts from an empty page: no clock, offset or sample survives it.
+test('after a refresh Hulu is exact at once, wherever playback resumes and whatever the timeline shows', () => {
+  const movie = video(1200, { id: 'content-video-player', currentTime: 1234.567, paused: false });
+  const slider = { getAttribute: name => name === 'aria-valuenow' ? '1200' : '1915' };
+  const p = profile('https://www.hulu.com/watch/episode', [movie], { '#content-video-player': movie, '.Timeline__slider[aria-label="Timeline"]': slider });
+  assert.equal(p.SubtitleSite.subtitleTime(movie), 1234.567);
+  assert.equal(p.SubtitleSite.awaitingClock(movie), false);
+});
+
+// Measured on Disney+ (2026-10-10): every seek restarts the Hive media time near 20 s, so the
+// offset learned before it is void at once. The seek itself lasted under 100 ms, shorter than
+// one overlay poll, and the old offset showed a line from the start of the film.
+function liveBar(maximum, title) {
+  const progress = { style: { width: '' } };
+  const set = seconds => { progress.style.width = `${(seconds / maximum * 100).toFixed(5)}%`; };
+  set(title);
+  const slider = { getAttribute: name => name === 'aria-valuenow' ? String(Math.floor(title)) : String(maximum), querySelector: () => progress };
+  return { set, elements: { 'main-app-controls-overlay': { shadowRoot: { querySelector: () => slider, querySelectorAll: () => [] } } } };
+}
+test('a Disney seek voids the offset at once, even when no poll sees it, and the bar sets a new one', () => {
+  const bar = liveBar(7726, 122);
+  const p = profile('https://www.disneyplus.com/play/film', [], bar.elements);
+  let seeking;
+  const movie = video(1200, { id: 'hivePlayer2', currentTime: 142, paused: false, addEventListener: (type, handler) => { if (type === 'seeking') seeking = handler; } });
+  assert.ok(Math.abs(p.SubtitleSite.subtitleTime(movie) - 122) < 1e-3);
+  // Fast-forward: the seek starts and ends between two polls and media time restarts at 20.
+  seeking(); movie.currentTime = 20;
+  assert.ok(Number.isNaN(p.SubtitleSite.subtitleTime(movie)), 'the bar still shows the old place: nothing is shown');
+  assert.equal(p.SubtitleSite.awaitingClock(movie), false, 'no prompt while a seek settles');
+  // The bar jumps to the target; playback really resumes 0.1 s before it.
+  bar.set(132.03);
+  assert.ok(Math.abs(p.SubtitleSite.subtitleTime(movie) - 132.03) < 1e-3);
+  movie.currentTime = 20.26; bar.set(132.19);
+  assert.ok(Math.abs(p.SubtitleSite.subtitleTime(movie) - 132.19) < 1e-3, 'the first reading after a seek is replaced by the next');
+  movie.currentTime = 21; 
+  assert.ok(Math.abs(p.SubtitleSite.subtitleTime(movie) - 132.93) < 1e-3);
+});
+
+test('Disney media time running backwards is a seek even without an event or flag', () => {
+  const bar = liveBar(7726, 122);
+  const p = profile('https://www.disneyplus.com/play/film', [], bar.elements);
+  const movie = video(1200, { id: 'hivePlayer2', currentTime: 142, paused: false });
+  p.SubtitleSite.subtitleTime(movie);
+  movie.currentTime = 20;
+  assert.ok(Number.isNaN(p.SubtitleSite.subtitleTime(movie)));
+  bar.set(112); movie.currentTime = 20.1;
+  assert.ok(Math.abs(p.SubtitleSite.subtitleTime(movie) - 112) < 1e-3);
+});
+
+test('after a seek while paused, a Disney bar that no longer changes is taken once it has stood still', () => {
+  const bar = liveBar(7726, 122);
+  const p = profile('https://www.disneyplus.com/play/film', [], bar.elements);
+  let clock = 1000; p.Date = { now: () => clock };
+  const movie = video(1200, { id: 'hivePlayer2', currentTime: 142, paused: true });
+  // The viewer drags the bar while paused; the overlay has already read the target position.
+  bar.set(300); p.SubtitleSite.subtitleTime(movie);
+  movie.seeking = true; p.SubtitleSite.subtitleTime(movie);
+  movie.seeking = false; movie.currentTime = 20;
+  assert.ok(Number.isNaN(p.SubtitleSite.subtitleTime(movie)));
+  clock += 450;
+  assert.ok(Math.abs(p.SubtitleSite.subtitleTime(movie) - 300) < 1e-3);
+});
+
+// Measured on Disney+ (2026-10-10): after a reload the film played for two minutes with all
+// translations loaded and no subtitle, because the controls were never asked for on a fresh page.
+// One synthetic pointer move on the video revealed them at once.
+test('a fresh Disney page asks for the controls itself and keeps asking, less and less often', () => {
+  const p = profile('https://www.disneyplus.com/play/film');
+  let clock = 0; p.Date = { now: () => clock };
+  p.MouseEvent = class { constructor(type, init) { this.type = type; Object.assign(this, init); } };
+  const moves = [];
+  const movie = video(1200, { id: 'hivePlayer1', currentTime: 20, paused: false, dispatchEvent: event => moves.push([clock, event.type]) });
+  assert.ok(Number.isNaN(p.SubtitleSite.subtitleTime(movie)));
+  assert.deepEqual(moves, [[0, 'mousemove']], 'the first poll of a fresh page already asks');
+  for (clock = 150; clock <= 120000; clock += 150) p.SubtitleSite.subtitleTime(movie);
+  assert.ok(moves.length >= 8 && moves.length <= 14, `asks on through two minutes, with growing pauses (${moves.length} times)`);
+  assert.ok(moves.at(-1)[0] - moves.at(-2)[0] <= 30000);
+});
+
+// Seen on Disney+ (2026-10-10): the Hive element reported a duration of 133.3 s on a 50-minute
+// episode. A 2-line segment of another track ended at 132.9 s, passed as the whole episode in
+// place of the 884-line English file, and the popup said "2 subtitles ready" over an empty screen.
+test('on Disney only a complete playlist covers the title; the element duration and loose segments never do', async () => {
+  await import('../extension/core.js');
+  const core = globalThis.SubtitleCore;
+  const context = profile('https://www.disneyplus.com/play/episode'); context.SubtitleCore = core;
+  const hive = video(1728, { id: 'hivePlayer4', duration: 133.304055 });
+  const lines = (count, end) => Array.from({ length: count }, (_, i) => ({ start: end * i / count, end: end * (i + 1) / count }));
+  const english = { cues: lines(884, 2986.358), duration: 3000 }, segment = { cues: lines(2, 132.924), duration: 0 };
+  const covers = file => core.coversTitle(file.cues, context.SubtitleSite.titleSeconds(hive, file));
+  assert.equal(covers(segment), false); assert.equal(covers(english), true);
+  assert.equal(core.coversTitle(lines(40, 600), 3000), false, 'a file that stops early is not the whole title');
+  assert.equal(core.coversTitle(lines(40, 3100), 3000), false, 'nor one that runs past it');
+  const hulu = profile('https://www.hulu.com/watch/episode', [], { '.Timeline__slider[aria-label="Timeline"]': { getAttribute: () => '5948' } }); hulu.SubtitleCore = core;
+  assert.equal(hulu.SubtitleSite.titleSeconds({ duration: 1915 }, segment), 1915);
+  assert.equal(hulu.SubtitleSite.titleSeconds({ duration: Infinity }, segment), 5948);
 });

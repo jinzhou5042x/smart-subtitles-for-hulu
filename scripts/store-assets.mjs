@@ -47,9 +47,9 @@ p{position:absolute;left:40px;top:612px;width:860px;margin:0;font-size:22px;line
 <div class="popup"><img src="${popupImage}"></div><p>${caption}</p></body></html>`;
 
 const screens = [
-  ['screenshot-1.png', 'Understand every line, <span class="mark">in your language</span>', 'Il m’a fait porter le chapeau.', 'He threw me under the bus.', await popup('fr', { tone: 'done', status: 'Episode subtitles ready', detail: 'Synced to the original timing', total: 2310, translated: 2310, elapsedMs: 452000, usage: { input: 61840, cachedInput: 38200, output: 70510, reasoning: 3120 } }, 458),
+  ['screenshot-1.png', 'Understand every line, <span class="mark">in your language</span>', 'Il m’a fait porter le chapeau.', 'He threw me under the bus.', await popup('fr', { tone: 'done', status: 'Episode subtitles ready', detail: 'Synced to the original timing', total: 2310, translated: 2310, elapsedMs: 452000, usage: { input: 61840, cachedInput: 38200, output: 70510, reasoning: 3120 } }, 278),
     'The original English subtitles stay on screen, with a natural translation right above them. Slang, sarcasm and idioms are translated by meaning, not word for word.'],
-  ['screenshot-2.png', 'English to <span class="mark">55 languages</span>', 'Genial. Justo lo que me faltaba.', 'Oh, great. Just what I needed.', await popup('es', { tone: 'working', status: 'Receiving the Codex translation', total: 2310, translated: 412, elapsedMs: 92000, usage: { input: 30920, cachedInput: 0, output: 12580, reasoning: 640 } }, 429),
+  ['screenshot-2.png', 'English to <span class="mark">55 languages</span>', 'Genial. Justo lo que me faltaba.', 'Oh, great. Just what I needed.', await popup('es', { tone: 'working', status: 'Receiving the Codex translation', total: 2310, translated: 412, elapsedMs: 92000, usage: { input: 30920, cachedInput: 0, output: 12580, reasoning: 640 } }, 296),
     'Pick a language and a translator. Subtitles appear within seconds and follow the original timing; drag them up or down, and set the size you like.']
 ];
 for (const [file, title, translation, original, popupImage, caption] of screens) {

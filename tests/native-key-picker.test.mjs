@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import { launchKeyPicker } from '../service/native-key-picker.mjs';
 
-test('native bridge tracks actual handle, sends focus/cancel to the same process, and clears on close', { skip: process.platform !== 'win32' }, async () => {
+test('native bridge tracks actual handle, sends focus/cancel to the same process, and clears on close', { skip: !['win32', 'darwin'].includes(process.platform) }, async () => {
   const child = new EventEmitter();
   Object.assign(child, { pid: 123, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), kill() {} });
   const commands = []; child.stdin.on('data', data => commands.push(String(data)));
@@ -29,4 +29,16 @@ test('native page centering supports monitors left of and above the primary moni
   const output = execFileSync('powershell.exe', ['-NoProfile', '-Command',
     "Add-Type -Path './service/key-picker.cs' -ReferencedAssemblies System.Windows.Forms,System.Drawing; [SubtitleKeyPicker]::Center(-1920,0,1920,1080,0.1,0.9,800,600) -join ','; [SubtitleKeyPicker]::Center(0,-1080,1920,1080,0.1,0.9,800,600) -join ','"], { encoding: 'utf8', windowsHide: true });
   assert.deepEqual(output.trim().split(/\r?\n/), ['-1360,294', '560,-786']);
+});
+
+ test('native picker closes cleanly after subprocess failure', { skip: !['win32', 'darwin'].includes(process.platform) }, async () => {
+  const child = new EventEmitter();
+  Object.assign(child, { pid: 124, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), kill() {} });
+  const states = [];
+  const session = launchKeyPicker('load', state => states.push(state), {}, () => child);
+  const rejected = assert.rejects(session.result, /Cannot start the native file picker/);
+  child.emit('error', new Error('launch failed'));
+  await rejected;
+  assert.equal(states.at(-1).phase, 'closed');
+  assert.equal(states.at(-1).pid, null);
 });

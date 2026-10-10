@@ -45,6 +45,11 @@
     const fallback = Number(timelineMax);
     return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
   }
+  // A subtitle file belongs to the whole title when its last line ends in the title's final third
+  // and not after it. Without a known length nothing qualifies.
+  function coversTitle(cues, seconds) {
+    return seconds > 0 && cues.length > 0 && cues.at(-1).end >= seconds * 0.65 && cues.at(-1).end <= seconds + 30;
+  }
   function pictureRect(rect, videoWidth, videoHeight, fit = 'contain', aspect = 0) {
     let { left, top, width, height } = rect;
     if (!(videoWidth > 0 && videoHeight > 0 && width > 0 && height > 0)) return { left, top, width, height };
@@ -94,5 +99,5 @@
     return 'unknown';
   }
   const isEnglish = cues => sourceLanguage(cues) === 'en';
-  scope.SubtitleCore = { hash, clean, cue, timestamp, ttmlTime, parseSubtitles, active, batch, mediaDuration, pictureRect, englishShare, sourceLanguage, isEnglish };
+  scope.SubtitleCore = { hash, clean, cue, timestamp, ttmlTime, parseSubtitles, active, batch, mediaDuration, coversTitle, pictureRect, englishShare, sourceLanguage, isEnglish };
 })(globalThis);

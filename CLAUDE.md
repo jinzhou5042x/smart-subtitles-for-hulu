@@ -1,4 +1,4 @@
-# Smart Subtitles for Disney+ & Hulu: notes for agents
+# Smart Subtitles: notes for agents
 
 Bilingual subtitles on Hulu: a Chrome extension (hulu.com only) plus a local Windows companion
 service that translates the episode's English subtitles with Codex through the user's own ChatGPT
@@ -33,6 +33,19 @@ sign-in. Everything stays on the user's computer; there is no server of ours.
   Save and read back complete 1-minute video windows before publishing; checkpoints must not
   cause model calls. No review-model gate.
 - Hulu clock invariant: use dedicated content-video-player.currentTime unchanged; NEVER calibrate it from the rounded UI timeline. Disney has a separate offset policy. See docs/incidents/2026-10-06-subtitle-clock-drift.md before changing clock code.
+- The product is named "Smart Subtitles", with no streaming service in the name: Netflix and others
+  are planned. Supported services are listed once, in `extension/sites.js` (`names`).
+- Each translator has its own record and progress per episode and language; one translator's
+  result is never shown for another. "Translate again" in the popup writes a draft beside the
+  record and replaces the record only when the draft is complete (`service/database.mjs`).
+- Disney+ clock facts measured in live playback (2026-10-10): the progress bar's width is the live
+  time, `aria-valuenow` is frozen, every seek restarts media time. Read the incident file first.
+- The viewer is never asked to press Retry for something the software can recover from (owner,
+  2026-10-10). Validated one-minute windows are saved as they pass; a model slip is retried from
+  the last saved window, then that window alone (`service/checkpoints.mjs`); every other failure
+  is retried by the page with growing pauses (`extension/session.js`). Only what the viewer must
+  clear (sign-in, quota, key, missing program: `needsViewer` in `service/episodes.mjs`) pauses
+  with Retry, and even that is asked again every two minutes.
 - Up to 16 videos translate at once (`maxAgents`); closing a tab stops its translation, a reload
   resumes from the progress saved in SQLite.
 - Real dialogue in tests and docs is fine. Personal information about the owner is not (below).
@@ -64,11 +77,16 @@ sign-in. Everything stays on the user's computer; there is no server of ours.
 
 ## Where things are
 
-- Anything that depends on Hulu's player (episode page, `#content-video-player`,
-  `#ad-video-player`, timeline): `extension/site.js` only.
+- Anything that depends on a streaming service's player: its adapter in `extension/players/` only
+  (`hulu.js`, `disney.js`), behind the contract documented in `extension/site.js`. Adding a service
+  is described in README-DEVELOPMENT.md.
 - Subtitle discovery in the page world: `extension/capture.js` (playback JSON incl.
   `transcripts_urls`, HLS segmented WebVTT with `X-TIMESTAMP-MAP`, DASH text tracks, `<track>`).
-- Episode flow, overlay and popup status: `extension/content.js`; popup: `extension/popup.*`.
+- Which track is the title's: `extension/tracks.js`. The translation of it: `extension/session.js`.
+  Drawing: `extension/overlay.js`. `extension/content.js` only connects them; popup: `extension/popup.*`.
+- Before believing anything about a player, read it from the page: "Copy diagnostics" in the popup,
+  or `npm run check:browser` for the page scripts themselves. Tests built on assumed player
+  behaviour passed while four such assumptions were wrong (incident file, 2026-10-09/10).
 - Service: `service/server.mjs` (API on 127.0.0.1:43127, pairing token), `episodes.mjs`
   (per-episode state, resume, Codex token usage), `jobs.mjs` (concurrency), `database.mjs`
   (SQLite: `sources`, `translations`, `lines`), `codex.mjs` (app-server threads).

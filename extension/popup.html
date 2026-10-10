@@ -1,34 +1,45 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart Subtitles for Disney+ &amp; Hulu</title><link rel="stylesheet" href="popup.css"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart Subtitles</title><link rel="stylesheet" href="popup.css"></head>
 <body><main>
   <header>
-    <h1>Smart Subtitles<small>for Disney+ &amp; Hulu</small></h1>
+    <img class="logo" src="icon.svg" alt="" width="28" height="28">
+    <h1>Smart Subtitles</h1>
     <label class="switch" title="Show bilingual subtitles"><input id="enabled" type="checkbox" role="switch" aria-label="Show bilingual subtitles"><span aria-hidden="true"></span></label>
   </header>
-  <div class="row"><label for="target">Language</label><select id="target"></select></div>
-  <div class="row" id="providerRow" hidden><label for="provider">Translator</label><select id="provider"></select></div>
-  <div id="googleSetup" hidden>
-    <div id="googleKeyLabel" hidden><span>Link API key file</span><button id="googleClear" type="button" title="Unlink this file without deleting it">Clear</button></div>
-    <a id="googleLoad" href="#">Link API key file...</a>
-    <p id="googleError" role="alert" hidden></p>
-  </div>
-  <div class="row"><label for="fontSize">Subtitle size</label><input id="fontSize" type="range" min="18" max="100" step="1" value="60"><output id="fontSizeValue" for="fontSize">60</output></div>
-  <form id="pair" hidden>
-    <p>Enter the pairing code shown when you run <b>Start Subtitles.cmd</b>.</p>
-    <input id="pairCode" autocomplete="off" spellcheck="false" placeholder="Pairing code"><button>Connect</button>
-    <p id="pairError" hidden></p>
+  <form id="pair" class="card" hidden>
+    <p>Enter the pairing code shown when you start the subtitle service.</p>
+    <div class="pairing"><input id="pairCode" autocomplete="off" spellcheck="false" placeholder="Pairing code" aria-label="Pairing code"><button class="primary">Connect</button></div>
+    <p id="pairError" role="alert" hidden></p>
   </form>
-  <section aria-live="polite">
-    <div class="state" id="state" data-tone="waiting"><p id="status">Connecting…</p></div>
+  <section id="card" class="card" aria-live="polite" data-tone="waiting">
+    <div class="headline"><p id="status">Connecting…</p><span id="percent"></span></div>
+    <div id="meter" class="track" role="progressbar" aria-label="Translated subtitles" aria-valuemin="0" aria-valuemax="100" hidden><div id="fill" class="fill"></div></div>
     <p id="detail" hidden></p>
-    <div id="meter" class="meter" hidden>
-      <span id="count"></span>
-      <div class="track" role="progressbar" aria-label="Translated subtitles" aria-valuemin="0" aria-valuemax="100"><div id="fill" class="fill"></div></div>
-      <span id="percent"></span>
+    <div id="actions" class="actions" hidden>
+      <button id="retry" class="primary" type="button" hidden>Retry</button>
+      <button id="again" class="quiet" type="button" hidden>Translate again</button>
     </div>
-    <button id="retry" hidden>Retry</button>
+    <div id="confirm" class="confirm" hidden>
+      <p id="confirmText"></p>
+      <div class="actions"><button id="confirmYes" class="primary" type="button">Translate again</button><button id="confirmNo" class="quiet" type="button">Cancel</button></div>
+    </div>
   </section>
+  <div class="group">
+    <div class="row"><label for="target">Language</label><select id="target"></select></div>
+    <div class="row" id="providerRow" hidden><span class="label" id="providerLabel">Translator</span><div id="providerChoice" class="segments" role="radiogroup" aria-labelledby="providerLabel"></div><select id="provider" hidden></select></div>
+    <div class="row" id="codexSetup" hidden>
+      <span class="label">Codex</span>
+      <span class="key"><span id="codexState"></span><button id="codexSignIn" class="primary" type="button" hidden>Log in</button><button id="codexCancel" class="quiet small" type="button" hidden>Cancel</button><button id="codexSignOut" class="quiet small" type="button" hidden>Log out</button></span>
+      <p id="codexNote" class="note"></p>
+    </div>
+    <div class="row" id="googleSetup" hidden>
+      <span class="label">API key</span>
+      <span class="key"><a id="googleLoad" href="#">Choose file…</a><button id="googleClear" class="quiet" type="button" title="Unlink this file without deleting it" hidden>Unlink</button></span>
+      <p id="googleError" role="alert" hidden></p>
+    </div>
+    <div class="row"><label for="fontSize">Size</label><input id="fontSize" type="range" min="18" max="100" step="1" value="60"><output id="fontSizeValue" for="fontSize">60</output></div>
+  </div>
   <footer>
-    <nav><a id="issue" href="https://github.com/jinzhou5042x/smart-subtitles-for-hulu/issues/new"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.23.83 1.23.83.71 1.22 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.66 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 0z"/></svg>Report an issue</a><a id="legal" href="legal.html">Terms &amp; Privacy</a></nav>
+    <nav><a id="issue" href="https://github.com/jinzhou5042x/smart-subtitles-for-hulu/issues/new"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.23.83 1.23.83.71 1.22 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.66 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 8 0z"/></svg>Report an issue</a><a id="copy" href="#" title="Copies what the extension currently sees on this page: no subtitle text, no addresses">Copy diagnostics</a><a id="legal" href="legal.html">Terms &amp; Privacy</a></nav>
   </footer>
 </main><script src="popup.js" type="module"></script></body></html>
