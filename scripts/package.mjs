@@ -1,4 +1,4 @@
-// Builds the Chrome Web Store upload: dist/store/smart-subtitles-for-hulu-<version>.zip.
+// Builds the Chrome Web Store upload: dist/store/smart-subtitles-for-disney-plus-and-hulu-<version>.zip.
 // Unlike `npm run build`, it starts from extension/ (never dist/extension), so the developer's
 // local-connection.json pairing file cannot be included; users pair in the popup instead.
 // Content scripts run on Hulu only; 127.0.0.1 stays a host permission for the local service.
@@ -21,7 +21,7 @@ const manifest = JSON.parse(await readFile(manifestFile, 'utf8'));
 for (const script of manifest.content_scripts) script.matches = script.matches.filter(match => !match.startsWith('http://127.0.0.1'));
 await writeFile(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
 
-const zip = path.join(out, `smart-subtitles-for-hulu-${manifest.version}.zip`);
+const zip = path.join(out, `smart-subtitles-for-disney-plus-and-hulu-${manifest.version}.zip`);
 // Windows' bsdtar writes standard zip entries (forward slashes). PowerShell 5.1 Compress-Archive writes
 // "icons\icon-16.png", which the Chrome Web Store rejects ("No manifest found in package").
 // Elsewhere (macOS, Linux) the zip/unzip commands do the same.

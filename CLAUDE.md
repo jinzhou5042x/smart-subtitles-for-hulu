@@ -1,4 +1,4 @@
-# Smart Subtitles for Hulu: notes for agents
+# Smart Subtitles for Disney+ & Hulu: notes for agents
 
 Bilingual subtitles on Hulu: a Chrome extension (hulu.com only) plus a local Windows companion
 service that translates the episode's English subtitles with Codex through the user's own ChatGPT

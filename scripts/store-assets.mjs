@@ -69,7 +69,7 @@ h1{margin:0;font-size:38px;line-height:1;font-weight:800;letter-spacing:-1.2px}
 .f{display:flex;align-items:center;gap:11px;font-size:18.5px;font-weight:700;letter-spacing:-.4px;white-space:nowrap}
 .f svg{width:38px;height:38px;flex:none;padding:8px;box-sizing:border-box;border-radius:10px;background:#13a8651a;stroke:#13a865;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 </style></head><body>
-<div class="brand"><img src="${ext('icon.svg')}"><h1>Smart<br>Subtitles</h1><div class="for">for Hulu</div></div>
+<div class="brand"><img src="${ext('icon.svg')}"><h1>Smart<br>Subtitles</h1><div class="for">for Disney+<br>&amp; Hulu</div></div>
 <div class="features">
   <div class="f"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/></svg>55 languages</div>
   <div class="f"><svg viewBox="0 0 24 24"><path d="M9.5 12.5a2.5 2.5 0 1 1 0-.01V12c0 2.6-1.4 4.6-3.6 5.4M18.5 12.5a2.5 2.5 0 1 1 0-.01V12c0 2.6-1.4 4.6-3.6 5.4" stroke-width="2.2"/><circle cx="7" cy="10.8" r="2.4" fill="#13a865" stroke="none"/><circle cx="16" cy="10.8" r="2.4" fill="#13a865" stroke="none"/></svg>Natural translation</div>

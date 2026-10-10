@@ -21,7 +21,6 @@ function showState({ tone = 'waiting', status, detail = '', total = 0, translate
     $('count').textContent = tone === 'done' ? `${total.toLocaleString()} subtitles` : `${translated.toLocaleString()} / ${total.toLocaleString()} subtitles`;
     $('percent').textContent = `${percent}%`;
   }
-
 }
 function showError(message) { showState({ tone: 'error', status: 'Cannot prepare subtitles right now', detail: message, retry: true }); }
 // Shown until the extension holds the pairing code of the local service.
@@ -37,12 +36,15 @@ $('pair').onsubmit = async e => {
 };
 // The service decides which translators exist; the row is shown only when there is a choice.
 const PROVIDER_NAMES = { codex: 'Codex', google: 'Google', local: 'Hy-MT2 (local)' };
-let wantedProvider = 'codex', googleConfigured = false, editingGoogle = false, saveSettings = async () => {};
+let pickerId = '';
+let wantedProvider = 'codex', googleConfigured = false, googleKeyPath = '', saveSettings = async () => {};
 function showGoogle() {
   const selected = $('provider').value === 'google';
-  $('googleSetup').hidden = !selected || (googleConfigured && !editingGoogle);
-  $('googleEdit').hidden = !selected || !googleConfigured || editingGoogle;
-  document.querySelector('section').hidden = !$('googleSetup').hidden;
+  $('googleSetup').hidden = !selected;
+  $('googleKeyLabel').hidden = !googleKeyPath;
+  $('googleLoad').textContent = googleKeyPath || 'Link API key file...';
+  $('googleLoad').title = googleKeyPath ? 'Choose another API key file' : 'Choose your API key file';
+  document.querySelector('section').hidden = selected && !googleConfigured;
 }
 function showProviders(list) {
   const select = $('provider');
@@ -50,14 +52,26 @@ function showProviders(list) {
     select.dataset.list = list.join();
     select.replaceChildren(...list.map(p => new Option(PROVIDER_NAMES[p] || p, p)));
   }
-  select.value = list.includes(wantedProvider) ? wantedProvider : list[0];
+  if (!list.includes(wantedProvider)) select.append(new Option(PROVIDER_NAMES[wantedProvider] || wantedProvider, wantedProvider));
+  select.value = wantedProvider;
   $('providerRow').hidden = list.length < 2;
   limitLanguages(); showGoogle();
-  if (select.value !== wantedProvider) { wantedProvider = select.value; void saveSettings(); }
+  // Rendering the available choices must never rewrite the user's preference.
 }
 async function refresh() {
   try {
-    try { const status = await call({ type: 'status' }); googleConfigured = !!status.googleConfigured; showProviders(status.availableProviders || (status.providers?.length ? status.providers : ['codex'])); }
+    try { const status = await call({ type: 'status' }); googleConfigured = !!status.googleConfigured;
+      googleKeyPath = status.googleApiKeyFile || '';
+      const pick = status.googlePicker;
+      const picking = pick?.status === 'pending';
+      $('googleClear').disabled = picking;
+      $('googleLoad').setAttribute('aria-disabled', String(picking && pick.phase === 'saving'));
+      if (pick?.id && pick.id !== pickerId && pick.status !== 'pending') {
+        pickerId = pick.id;
+        if (pick.status === 'done') { wantedProvider = (await call({ type: 'settings' })).provider || 'google'; $('googleError').hidden = true; }
+        if (pick.status === 'error') { $('googleError').textContent = pick.error; $('googleError').hidden = false; }
+      }
+      showProviders(status.availableProviders || (status.providers?.length ? status.providers : ['codex'])); }
     catch (error) { if (error.message === 'NOT_PAIRED') return showPairing(); throw error; }
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const info = tab ? await playerMessage(chrome.tabs, { type: 'diagnostics' }, tab, chrome.scripting) : null;
@@ -69,17 +83,20 @@ try {
   // The slider's filled part follows its value (popup.css draws it from --fill).
   const paintSize = () => { const r = $('fontSize'); r.style.setProperty('--fill', `${(r.value - r.min) / (r.max - r.min) * 100}%`); $('fontSizeValue').textContent = r.value; };
   $('fontSize').value = settings.fontSize; paintSize();
-  const save = saveSettings = async () => { if ($('provider').value === 'google' && !googleConfigured) { showGoogle(); return; } try { await call({ type: 'saveSettings', settings: { enabled: $('enabled').checked, target: $('target').value, provider: $('provider').value || wantedProvider } }); await refresh(); } catch (e) { showError(e.message); } };
-  $('enabled').onchange = save; $('target').onchange = save; $('provider').onchange = () => { wantedProvider = $('provider').value; editingGoogle = false; $('googleKey').value = ''; limitLanguages(); showGoogle(); return save(); };
-  $('googleEdit').onclick = () => { editingGoogle = true; showGoogle(); };
-  $('googleSetup').onsubmit = async e => {
-    e.preventDefault(); $('googleSave').disabled = true; $('googleError').hidden = true;
-    const key = $('googleKey').value; $('googleKey').value = '';
-    try {
-      await call({ type: 'configureGoogle', key, file: $('googleFile').value.trim() });
-      googleConfigured = true; editingGoogle = false; showGoogle(); await save();
-    } catch (error) { $('googleError').textContent = error.message; $('googleError').hidden = false; }
-    finally { $('googleSave').disabled = false; }
+  const save = saveSettings = async () => { try { await call({ type: 'saveSettings', settings: { enabled: $('enabled').checked, target: $('target').value, provider: $('provider').value || wantedProvider } }); await refresh(); } catch (e) { showError(e.message); } };
+  $('enabled').onchange = save; $('target').onchange = save;
+  $('provider').onchange = () => { wantedProvider = $('provider').value; $('googleError').hidden = true; limitLanguages(); showGoogle(); return save(); };
+  $('googleLoad').onclick = async e => {
+    e.preventDefault();
+    if ($('googleLoad').getAttribute('aria-disabled') === 'true') return;
+    $('googleError').hidden = true;
+    try { await call({ type: 'pickGoogleKey', mode: 'load' }); await refresh(); }
+    catch (error) { $('googleError').textContent = error.message; $('googleError').hidden = false; }
+  };
+  $('googleClear').onclick = async () => {
+    $('googleClear').disabled = true; $('googleError').hidden = true;
+    try { await call({ type: 'configureGoogle', clear: true }); await refresh(); }
+    catch (error) { $('googleError').textContent = error.message; $('googleError').hidden = false; $('googleClear').disabled = false; }
   };
   let sizeTimer;
   $('fontSize').oninput = () => {

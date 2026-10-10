@@ -19,7 +19,7 @@ test('chosen key file is read directly, takes precedence, and fails closed', asy
   const request = { target: 'fr', cues: [{ id: 'c0', start: 0, end: 1, text: 'Hello' }] };
   try {
     await assert.rejects(translator.translate(request), /Cannot read googleApiKeyFile/);
-    await writeFile(file, '  test-key\n');
+    await writeFile(file, '\uFEFF \t\r\ntest-key \t\r\n');
     await translator.translate(request);
     await writeFile(file, '');
     await assert.rejects(translator.translate(request), /Set googleApiKeyFile/);
@@ -28,25 +28,41 @@ test('chosen key file is read directly, takes precedence, and fails closed', asy
 });
 
 
-test('Google configuration stores only a path, never overwrites files or returns the key', async () => {
+test('linking stores only a path, strips surrounding whitespace, and never modifies key files', async () => {
   const { configureGoogle } = await import('../service/google-settings.mjs');
   const { readFile } = await import('node:fs/promises');
   const dir = await mkdtemp(path.join(tmpdir(), 'subtitle-config-'));
-  const configFile = path.join(dir, 'local.json'), file = path.join(dir, 'key.txt');
-  const config = { providers: ['codex'] }, key = 'test_key_12345678901234567890';
+  const configFile = path.join(dir, 'local.json'), first = path.join(dir, 'first.txt'), second = path.join(dir, 'second.txt');
+  const config = { providers: ['codex'] };
+  const original = '\uFEFF \t\r\nx! \r\n';
   try {
     await writeFile(configFile, JSON.stringify({ pairingToken: 'existing' }));
-    assert.deepEqual(await configureGoogle(config, { file, key }, configFile), { configured: true });
+    await writeFile(first, original); await writeFile(second, 'second-key\r\n');
+    assert.deepEqual(await configureGoogle(config, { file: first }, configFile), { configured: true });
+    assert.equal(config.googleApiKeyFile, first);
+    assert.equal(await readFile(first, 'utf8'), original);
+    await configureGoogle(config, { file: second }, configFile);
+    assert.equal(config.googleApiKeyFile, second);
+    assert.equal(await readFile(second, 'utf8'), 'second-key\r\n');
     const saved = await readFile(configFile, 'utf8');
-    assert.equal(saved.includes(key), false);
+    assert.equal(saved.includes('second-key'), false);
     assert.equal(JSON.parse(saved).pairingToken, 'existing');
-    assert.equal(config.googleApiKeyFile, file);
-    assert.deepEqual(config.providers, ['codex', 'google']);
-    await assert.rejects(configureGoogle(config, { file, key: 'another_key_123456789012345' }, configFile), /already exists/);
-    assert.equal((await readFile(file, 'utf8')).trim(), key);
-    await configureGoogle(config, { file, key: '' }, configFile);
-    await assert.rejects(configureGoogle(config, { file: 'relative.txt', key }, configFile), /absolute/);
-    await assert.rejects(configureGoogle(config, { file: '//server/share/key.txt', key }, configFile), /local/);
+    const empty = path.join(dir, 'empty.txt'); await writeFile(empty, ' \r\n\t');
+    await assert.rejects(configureGoogle(config, { file: empty }, configFile), /empty/);
+    await assert.rejects(configureGoogle(config, { file: path.join(dir, 'missing.txt') }, configFile), /Cannot read/);
+    await assert.rejects(configureGoogle(config, { file: dir }, configFile), /Cannot read/);
+    assert.equal(config.googleApiKeyFile, second);
+    assert.equal(await readFile(configFile, 'utf8'), saved);
+    assert.deepEqual(await configureGoogle(config, { clear: true }, configFile), { configured: false });
+    assert.equal(config.googleApiKeyFile, null);
+    assert.equal(JSON.parse(await readFile(configFile, 'utf8')).googleApiKeyFile, null);
+    assert.equal(await readFile(second, 'utf8'), 'second-key\r\n');
+    const translator = new GoogleTranslator({ ...config, googleApiKey: 'legacy' }, () => assert.fail('Cleared key must not fall back'));
+    await assert.rejects(translator.translate({ cues: [], target: 'fr' }), /Link your/);
+    await configureGoogle(config, { file: second }, configFile);
+    assert.equal(config.googleApiKeyFile, second);
+    await assert.rejects(configureGoogle(config, { file: 'relative.txt' }, configFile), /absolute/);
+    await assert.rejects(configureGoogle(config, { file: '//server/share/key.txt' }, configFile), /local/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

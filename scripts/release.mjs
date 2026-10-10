@@ -1,4 +1,4 @@
-// Builds the Windows companion service for users: dist/release/SmartSubtitlesForHulu-Service-<version>-win-x64.zip
+// Builds the Windows companion service for users: dist/release/SmartSubtitlesForDisneyPlusAndHulu-Service-<version>-win-x64.zip
 // - Only an allowlist of files is copied: the Codex backend, the shared language list and the
 //   launch/setup scripts. config/local.json (pairing code, API keys), data, logs, models and the
 //   development tools are never included; each user's first start creates their own pairing code.
@@ -12,7 +12,7 @@ import path from 'node:path';
 import { root } from '../service/config.mjs';
 
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-const name = `SmartSubtitlesForHulu-Service-${pkg.version}-win-x64`;
+const name = `SmartSubtitlesForDisneyPlusAndHulu-Service-${pkg.version}-win-x64`;
 const releaseDir = path.join(root, 'dist/release'), out = path.join(releaseDir, name), cache = path.join(releaseDir, 'cache');
 // Windows' own bsdtar (zip support); a GNU tar earlier on PATH would read 'C:' as a remote host.
 const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
@@ -22,20 +22,21 @@ await mkdir(out, { recursive: true }); await mkdir(cache, { recursive: true });
 
 const FILES = [
   'service/codex.mjs', 'service/config.mjs', 'service/database.mjs', 'service/episodes.mjs', 'service/jobs.mjs', 'service/server.mjs', 'service/translation.mjs',
+  'service/checkpoints.mjs', 'service/keyed.mjs', 'service/google.mjs', 'service/google-settings.mjs', 'service/google-picker.mjs', 'service/key-picker.cs', 'service/native-key-picker.mjs',
   'shared/languages.js', 'config/default.json',
   'scripts/start.ps1', 'scripts/stop.ps1', 'scripts/setup-codex.ps1', 'scripts/configure-codex.mjs', 'scripts/doctor.mjs'
 ];
 for (const file of FILES) { await mkdir(path.dirname(path.join(out, file)), { recursive: true }); await cp(path.join(root, file), path.join(out, file)); }
 const defaults = JSON.parse(await readFile(path.join(out, 'config/default.json'), 'utf8'));
 if (JSON.stringify(defaults.providers) !== '["codex"]') throw new Error('The release must enable Codex only');
-await writeFile(path.join(out, 'package.json'), JSON.stringify({ name: 'smart-subtitles-for-hulu-service', version: pkg.version, private: true, type: 'module' }, null, 2) + '\n');
+await writeFile(path.join(out, 'package.json'), JSON.stringify({ name: 'smart-subtitles-for-disney-plus-and-hulu-service', version: pkg.version, private: true, type: 'module' }, null, 2) + '\n');
 await cp(path.join(root, 'extension/legal.html'), path.join(out, 'TERMS-AND-PRIVACY.html'));
 const launcher = command => `@echo off\r\ncd /d "%~dp0"\r\n${command}\r\npause\r\n`;
 await writeFile(path.join(out, 'Start Subtitles.cmd'), launcher('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\start.ps1"'));
 await writeFile(path.join(out, 'Stop Subtitles.cmd'), launcher('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\stop.ps1"'));
 await writeFile(path.join(out, 'Set Up Codex.cmd'), launcher('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\setup-codex.ps1"'));
 await writeFile(path.join(out, 'Check Environment.cmd'), launcher('"%~dp0node\\node.exe" scripts\\doctor.mjs'));
-await writeFile(path.join(out, 'README.txt'), `Smart Subtitles for Hulu - companion service ${pkg.version} (Windows)
+await writeFile(path.join(out, 'README.txt'), `Smart Subtitles for Disney+ & Hulu - companion service ${pkg.version} (Windows)
 =====================================================================
 
 The Chrome extension shows bilingual subtitles on Hulu. This service runs on your own computer,
@@ -48,7 +49,7 @@ Install
      installs the official Codex CLI into this folder (about 430 MB download), and opens the ChatGPT
      sign-in in your browser. You need a ChatGPT account with Codex access.
   3. Double-click "Start Subtitles.cmd" and copy the pairing code it shows.
-  4. Click the Smart Subtitles for Hulu extension icon in Chrome, paste the pairing code, click Connect.
+  4. Click the Smart Subtitles for Disney+ & Hulu extension icon in Chrome, paste the pairing code, click Connect.
   5. Open a Hulu video that has English subtitles and choose your language in the extension.
 
 Every day

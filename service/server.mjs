@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { configureGoogle } from './google-settings.mjs';
+import { GoogleKeyPicker } from './google-picker.mjs';
 import { timingSafeEqual } from 'node:crypto';
 import { readFile, appendFile, access } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -30,7 +31,8 @@ async function readJson(req, limit = 65536) {
   return JSON.parse(Buffer.concat(parts).toString('utf8'));
 }
 export function createServer(config, queue, episodes) {
-  return http.createServer(async (req, res) => {
+  const keyPicker = new GoogleKeyPicker(config);
+  const httpServer = http.createServer(async (req, res) => {
     const origin = req.headers.origin;
     // Browsers may only call the service from the extension (optionally only from the IDs listed in
     // config.allowedExtensionIds); every private endpoint also requires the pairing code.
@@ -65,8 +67,15 @@ export function createServer(config, queue, episodes) {
     }
     if (!tokenMatches(req.headers.authorization, `Bearer ${config.pairingToken}`)) return json(401, { error: 'Pairing token required' });
     try {
-      if (req.method === 'GET' && url.pathname === '/status') return json(200, { app: 'hulu-context-subtitles', queued: [...queue.jobs.values()].filter(j => j.status === 'queued').length, running: queue.running, maxAgents: queue.limit, model: config.model || 'Codex default model', providers: enabledProviders(config), availableProviders: [...new Set([...enabledProviders(config), 'google'])], googleConfigured: !!(config.googleApiKeyFile || config.googleApiKey || process.env.GOOGLE_TRANSLATE_API_KEY) });
-      if (req.method === 'POST' && url.pathname === '/settings/google') return json(200, await configureGoogle(config, await readJson(req, 4096)));
+      if (req.method === 'GET' && url.pathname === '/status') return json(200, { app: 'hulu-context-subtitles', queued: [...queue.jobs.values()].filter(j => j.status === 'queued').length, running: queue.running, maxAgents: queue.limit, model: config.model || 'Codex default model', providers: enabledProviders(config), availableProviders: [...new Set([...enabledProviders(config), 'google'])], googleConfigured: config.googleApiKeyFile !== null && !!(config.googleApiKeyFile || config.googleApiKey || process.env.GOOGLE_TRANSLATE_API_KEY), googleApiKeyFile: config.googleApiKeyFile || null, googlePicker: keyPicker.get() });
+      if (req.method === 'POST' && url.pathname === '/settings/google/picker/focus') { const { id } = await readJson(req); return json(200, keyPicker.focus(id)); }
+      if (req.method === 'POST' && url.pathname === '/settings/google/picker/cancel') { const { id } = await readJson(req); return json(200, keyPicker.cancel(id)); }
+      if (req.method === 'POST' && url.pathname === '/settings/google/picker') return json(202, keyPicker.start(await readJson(req, 4096)));
+      if (req.method === 'GET' && url.pathname === '/settings/google/picker') return json(200, keyPicker.get(url.searchParams.get('id')));
+      if (req.method === 'POST' && url.pathname === '/settings/google') {
+        if (keyPicker.get()?.status === 'pending') throw new Error('Finish or cancel file selection first');
+        return json(200, await configureGoogle(config, await readJson(req, 4096)));
+      }
       if (req.method === 'POST' && url.pathname === '/episodes' && episodes) {
         const request = validateRequest(await readJson(req, 8_000_000));
         if (!enabledProviders(config).includes(request.provider)) throw new Error(`The ${request.provider} translator is not enabled`);
@@ -89,6 +98,9 @@ export function createServer(config, queue, episodes) {
       return json(404, { error: 'Not found' });
     } catch (e) { json(400, { error: e.message }); }
   });
+  httpServer.closePicker = () => keyPicker.close();
+  httpServer.on('close', () => keyPicker.close());
+  return httpServer;
 }
 
 async function main() {
@@ -119,8 +131,8 @@ async function main() {
   const server = createServer(config, queue, episodes);
   server.requestTimeout = 15000;
   server.on('error', e => { console.error(e.code === 'EADDRINUSE' ? `Port ${config.port} already in use. Run doctor.` : e.message); closeAll(); process.exitCode = 1; });
-  server.listen(config.port, '127.0.0.1', () => { console.log(`Smart Subtitles for Hulu service: http://127.0.0.1:${config.port} (${enabledProviders(config).join(', ')}; up to ${queue.limit} videos at once)`); void appendFile(path.join(root, 'logs/service.log'), `${new Date().toISOString()} started pid=${process.pid}\n`); });
-  const stop = () => { for (const job of queue.jobs.values()) job.controller.abort(); closeAll(); server.close(); setTimeout(() => process.exit(0), 500).unref(); };
+  server.listen(config.port, '127.0.0.1', () => { console.log(`Smart Subtitles for Disney+ & Hulu service: http://127.0.0.1:${config.port} (${enabledProviders(config).join(', ')}; up to ${queue.limit} videos at once)`); void appendFile(path.join(root, 'logs/service.log'), `${new Date().toISOString()} started pid=${process.pid}\n`); });
+  const stop = () => { server.closePicker(); for (const job of queue.jobs.values()) job.controller.abort(); closeAll(); server.close(); setTimeout(() => process.exit(0), 500).unref(); };
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(e => { console.error(e.message); process.exitCode = 1; });

@@ -1,4 +1,4 @@
-# Smart Subtitles for Hulu
+# Smart Subtitles for Disney+ & Hulu
 
 > Unofficial tool, not affiliated with, endorsed by or sponsored by Hulu. "Hulu" is a trademark of its owner and is used only to describe compatibility. Personal, non-commercial use; provided as is, without warranty. See the [Terms of Use and Privacy Policy](extension/legal.html).
 
@@ -113,7 +113,7 @@ User research (complaints about dual-subtitle tools, competitors, Hulu's web pla
 ## Legal
 
 - **Terms of Use, Privacy Policy and third-party notices:** `extension/legal.html`, opened from the popup ("Terms & Privacy"). The same file can be hosted as the privacy policy URL required by the Chrome Web Store.
-- **Branding:** the product is named "Smart Subtitles for Hulu" and uses its own logo in a darker green than Hulu's brand colour, with an "unofficial" notice, so it is not mistaken for an official Hulu product.
+- **Branding:** the product is named "Smart Subtitles for Disney+ & Hulu" and uses its own logo in a darker green than Hulu's brand colour, with an "unofficial" notice, so it is not mistaken for an official Hulu product.
 - **Third-party software:** llama.cpp (MIT, © The ggml authors) and the Hy-MT2-7B model (Apache-2.0, © Tencent); their license files are in `runtime/llama.cpp` and `models/Hy-MT2-7B`.
 - These texts reduce risk but are not legal advice; have them reviewed before a wide public release.
 
@@ -134,3 +134,11 @@ Disney ad recovery invalidates its presentation offset on detected ad transition
 
 
 Clock incident and regression requirements: [Hulu subtitle clock drift](docs/incidents/2026-10-06-subtitle-clock-drift.md).
+
+
+Google key setup links an existing local UTF-8 file through one Explorer file picker. First selection and replacement use the same flow; only the path is persisted. No key-file creation, copying or overwriting occurs. Both setup and translation trim surrounding whitespace including CR/LF, spaces, tabs and BOM. Cancellation and invalid files keep the previous path. The companion owns the asynchronous picker; popup dismissal does not cancel it. The background worker polls authenticated requests and preserves the selected translator. The native helper receives the parent process ID and numeric browser bounds, never credentials.
+
+
+Native key picker lifecycle: the companion owns one operation and its child process. The Windows helper has a hidden message-pump host, not a second visible window, and reports the actual dialog HWND every 400 ms. States distinguish starting, open, saving and terminal completion. Duplicate starts rejoin/focus the existing operation; focus restores minimized dialogs with `ShowWindow(SW_RESTORE)` and requests foreground activation. EOF/parent exit, user cancel, process errors, a vanished window and stalled heartbeat all release the operation. The popup reads the companion's authoritative state and exposes one file-selection link; repeated clicks focus the current dialog. Cancel belongs to the native dialog. Browser session state is a polling pointer, not proof that a window exists. Keys never travel through the helper command line or status channel.
+
+The picker is a cached C# GUI executable compiled with the Windows .NET Framework compiler. It uses the modern IFileDialog API with the browser HWND as owner, a single Alt+Tab-accessible dialog, and explicit UTF-8 pipe streams. It does not launch PowerShell or a console window. Only a visible, nonempty #32770 dialog in the owned process counts as open. Page centering accounts for Chrome zoom; an inaccessible page falls back to browser centering.

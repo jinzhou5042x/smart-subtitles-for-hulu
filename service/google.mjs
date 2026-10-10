@@ -12,6 +12,7 @@ export class GoogleTranslator {
   async translate(request, signal, progress = () => {}) {
     signal?.throwIfAborted();
     let key;
+    if (this.config.googleApiKeyFile === null) throw new Error('Link your Google API key file in the extension');
     if (this.config.googleApiKeyFile) {
       try { key = (await readFile(this.config.googleApiKeyFile, 'utf8')).trim(); }
       catch { throw new Error('Cannot read googleApiKeyFile; check your chosen key file'); }

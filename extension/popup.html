@@ -1,22 +1,17 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart Subtitles for Hulu</title><link rel="stylesheet" href="popup.css"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart Subtitles for Disney+ &amp; Hulu</title><link rel="stylesheet" href="popup.css"></head>
 <body><main>
   <header>
-    <h1>Smart Subtitles<small>Hulu &amp; Disney+</small></h1>
+    <h1>Smart Subtitles<small>for Disney+ &amp; Hulu</small></h1>
     <label class="switch" title="Show bilingual subtitles"><input id="enabled" type="checkbox" role="switch" aria-label="Show bilingual subtitles"><span aria-hidden="true"></span></label>
   </header>
   <div class="row"><label for="target">Language</label><select id="target"></select></div>
   <div class="row" id="providerRow" hidden><label for="provider">Translator</label><select id="provider"></select></div>
-  <form id="googleSetup" hidden>
-    <label for="googleKey">Google API key</label>
-    <input id="googleKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste key, or use an existing file">
-    <label for="googleFile">Key file path</label>
-    <input id="googleFile" autocomplete="off" spellcheck="false" placeholder="C:/Users/you/Keys/google.txt" required>
-    <p>Key stored locally. Subtitles sent directly to Google.</p>
-    <button id="googleSave">Save &amp; use Google</button>
-    <p id="googleError" hidden></p>
-  </form>
-  <button id="googleEdit" hidden>Change API key</button>
+  <div id="googleSetup" hidden>
+    <div id="googleKeyLabel" hidden><span>Link API key file</span><button id="googleClear" type="button" title="Unlink this file without deleting it">Clear</button></div>
+    <a id="googleLoad" href="#">Link API key file...</a>
+    <p id="googleError" role="alert" hidden></p>
+  </div>
   <div class="row"><label for="fontSize">Subtitle size</label><input id="fontSize" type="range" min="18" max="100" step="1" value="60"><output id="fontSizeValue" for="fontSize">60</output></div>
   <form id="pair" hidden>
     <p>Enter the pairing code shown when you run <b>Start Subtitles.cmd</b>.</p>

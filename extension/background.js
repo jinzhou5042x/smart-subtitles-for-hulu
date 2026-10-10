@@ -38,6 +38,44 @@ async function request(route, method = 'GET', body) {
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
+async function broadcastSettings(next) {
+  const tabs = await chrome.tabs.query({ url: globalThis.SubtitleSites.matches });
+  await Promise.allSettled(tabs.map(t => chrome.tabs.sendMessage(t.id, { type: 'settingsChanged', settings: next })));
+}
+let watchingPicker = false;
+async function restorePickerPopup(id) {
+  const { googlePickerReturn } = await chrome.storage.session.get('googlePickerReturn');
+  if (googlePickerReturn?.id !== id) return;
+  // Consume once; status refreshes must never reopen a popup the user later dismisses.
+  await chrome.storage.session.set({ googlePickerReturn: null });
+  try {
+    await chrome.windows.update(googlePickerReturn.windowId, { focused: true });
+    await chrome.action.openPopup({ windowId: googlePickerReturn.windowId });
+  } catch { /* The originating browser window may have been closed. */ }
+}
+async function watchPicker() {
+  if (watchingPicker) return;
+  watchingPicker = true;
+  try {
+    for (;;) {
+      // Only the operation ID/status is persisted, never the API key or path.
+      const { googlePicker } = await chrome.storage.session.get('googlePicker');
+      if (!googlePicker || googlePicker.status !== 'pending') return;
+      let state;
+      try { state = await request(`/settings/google/picker?id=${encodeURIComponent(googlePicker.id)}`); }
+      catch { state = { id: googlePicker.id, status: 'error', error: 'Cannot reach the companion. Reopen setup to try again.' }; }
+      await chrome.storage.session.set({ googlePicker: state });
+      if (state.status !== 'pending') {
+        if (state.status === 'done') await broadcastSettings(await settings());
+        await chrome.storage.session.set({ googlePicker: state });
+        await restorePickerPopup(state.id);
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  } finally { watchingPicker = false; }
+}
+void watchPicker().catch(() => {});
 function isContent(sender) { return !!sender.tab && !!globalThis.SubtitleSites.identify(sender.url); }
 function isPopup(sender) { return !sender.tab && sender.url === chrome.runtime.getURL('popup.html'); }
 const clients = new Map();
@@ -63,10 +101,46 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         if (!isPopup(sender) || !/^[a-f0-9]{48}$/.test(message.token) || !Number.isInteger(message.port) || message.port < 1024 || message.port > 65535) throw new Error('That is not a valid pairing code');
         await chrome.storage.local.set({ token: message.token, port: message.port }); return request('/status');
       }
-      case 'status': return request('/status');
+      case 'status': {
+        const status = await request('/status');
+        if (status.googlePicker?.status === 'pending') {
+          await chrome.storage.session.set({ googlePicker: status.googlePicker });
+          void watchPicker().catch(() => {});
+        }
+        return status;
+      }
+      case 'focusGooglePicker':
+      case 'cancelGooglePicker': {
+        if (!isPopup(sender)) throw new Error('Popup only');
+        return request('/settings/google/picker/' + (message.type === 'focusGooglePicker' ? 'focus' : 'cancel'), 'POST', { id: message.id });
+      }
+      case 'pickGoogleKey': {
+        if (!isPopup(sender)) throw new Error('Popup only');
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        let anchor;
+        if (tab?.windowId !== undefined) {
+          const bounds = await chrome.windows.get(tab.windowId);
+          anchor = { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height, topRatio: 0, heightRatio: 1 };
+          try {
+            const zoom = await chrome.tabs.getZoom(tab.id);
+            const [{ result: viewport }] = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, args: [zoom], func: zoom => {
+              // inner dimensions use page CSS pixels; outer dimensions do not scale with page zoom.
+              const border = Math.max(0, (window.outerWidth - window.innerWidth * zoom) / 2);
+              return { topRatio: Math.max(0, window.outerHeight - window.innerHeight * zoom - border) / window.outerHeight, heightRatio: window.innerHeight * zoom / window.outerHeight };
+            } });
+            if (viewport?.topRatio >= 0 && viewport?.heightRatio > 0) Object.assign(anchor, viewport);
+          } catch {}
+        }
+        const state = await request('/settings/google/picker', 'POST', { mode: 'load', anchor });
+        await chrome.storage.session.set({ googlePicker: state, googlePickerReturn: { id: state.id, windowId: tab.windowId } });
+        void watchPicker().catch(() => {});
+        return state;
+      }
       case 'configureGoogle': {
         if (!isPopup(sender)) throw new Error('Popup only');
-        return request('/settings/google', 'POST', { file: message.file, key: message.key });
+        const result = await request('/settings/google', 'POST', message.clear ? { clear: true } : { file: message.file });
+        await broadcastSettings(await settings());
+        return result;
       }
       case 'subtitleResource': {
         if (!isContent(sender) || globalThis.SubtitleSites.identify(sender.url) !== 'disney') throw new Error('Disney+ player only');
